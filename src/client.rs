@@ -69,41 +69,36 @@ impl Client {
             self.noise_seeder.seed(),
             // seeder.as_mut(),
         );
-        let masks = self.get_template_masks(id);
-        masks
-            .into_iter()
-            .map(|mask| {
-                let mut ct = GlweCiphertext::new(
-                    0u64, 
-                    self.ip_param.glwe_size, 
-                    self.ip_param.polynomial_size, 
-                    ciphertext_modulus
-                );
 
-                // copy masks to ciphertexts
-                ct.get_mut_mask()
-                    .as_mut()
-                    .iter_mut()
-                    .zip(mask.as_polynomial_list().into_container().iter())
-                    .for_each(|(tgt, src)| *tgt = *src);
+        let mut glwe_ct_list = GlweCiphertextList::new(
+            0, 
+            self.ip_param.glwe_size, 
+            self.ip_param.polynomial_size, 
+            GlweCiphertextCount(self.ip_param.decomposition_level_count.0 * self.ip_param.glwe_size.0), 
+            ciphertext_modulus
+        );
 
+        self.fill_with_template_masks(id, &mut glwe_ct_list);
+
+        glwe_ct_list
+            .iter_mut()
+            .map(|mut ct| {
                 // TODO: encode
                 let pt = PlaintextListOwned::from_container(vec![]);
 
-                self.encrypt_with_existed_mask(&mut ct, pt, &mut generator);
+                self.encrypt_with_existed_masks(&mut ct, pt, &mut generator);
 
-                // get the body
                 GlweBody::from_container(
                     ct.get_body().as_polynomial().into_container().iter().copied().collect::<Vec<_>>(), 
                     ciphertext_modulus
                 )
             })
-            .collect::<Vec<_>>()
+            .collect()
     }
 
-    fn encrypt_with_existed_mask<G>(
+    fn encrypt_with_existed_masks<G>(
         &mut self, 
-        glwe_ct: &mut GlweCiphertextOwned<u64>, 
+        glwe_ct: &mut GlweCiphertextMutView<u64>, 
         pt: PlaintextListOwned<u64>, 
         generator: &mut RandomGenerator<G>
     ) where G : ByteRandomGenerator {
@@ -135,23 +130,17 @@ impl Client {
     /// total `GlweSize * DecompositionLevelCount` masks.
     /// The mask for the j-th decomposition of the i-th component of GlweCiphertext is at 
     ///     `i * DecompositionLevelCount + j`
-    fn get_template_masks(&mut self, id: u128) -> Vec<GlweMask<Vec<u64>>> {
+    fn fill_with_template_masks(&mut self, id: u128, glwe_ct_list: &mut GlweCiphertextListOwned<u64>) {
         let ciphertext_modulus = CiphertextModulus::new_native();
         let mut generator = RandomGenerator::<ActivatedRandomGenerator>::new(
             self.id_seeder.seed(id),
         );
         
-        (0..self.ip_param.glwe_size.0 * self.ip_param.decomposition_level_count.0).map(|_| {
-            let mut mask = GlweMask::from_container(
-                vec![0u64; glwe_ciphertext_mask_size(GlweDimension(self.ip_param.glwe_size.0 - 1), self.ip_param.polynomial_size)],
-                self.ip_param.polynomial_size, 
-                ciphertext_modulus,
-            );
-
-            generator.fill_slice_with_random_uniform_custom_mod(mask.as_mut(), ciphertext_modulus);
-
-            mask
-        }).collect()
+        glwe_ct_list
+            .iter_mut()
+            .for_each(|mut ct| {
+                generator.fill_slice_with_random_uniform_custom_mod(ct.get_mut_mask().as_mut(), ciphertext_modulus);
+            });
     }
 }
 
