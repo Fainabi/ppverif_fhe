@@ -22,16 +22,16 @@ pub const DEFAULT_INNER_PRODUCT_PARAMETER: GlweParameter<u64> = GlweParameter {
     decomposition_level_count: DecompositionLevelCount(3),
 };
 
-pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u32> = GlweParameter {
-    glwe_size: GlweSize(6),
+pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u8> = GlweParameter {
+    glwe_size: GlweSize(4),
     polynomial_size: PolynomialSize(128),
     std_dev: 0.00000000000000029403601535432533,
     // std_dev: 4.8828125e-5,
     // std_dev: 0.0,
     plaintext_modulus: 2,
-    delta: 1 << 31,
-    decomposition_base_log: DecompositionBaseLog(16),
-    decomposition_level_count: DecompositionLevelCount(1),
+    delta: 1 << 7,
+    decomposition_base_log: DecompositionBaseLog(8),  // unused
+    decomposition_level_count: DecompositionLevelCount(1),  // unused
 };
 
 

@@ -1,7 +1,4 @@
-use std::time::Instant;
-
 use rand::*;
-use tfhe::core_crypto::commons::generators::MaskRandomGenerator;
 use tfhe::core_crypto::prelude::*;
 use tfhe::core_crypto::commons::math::random::*;
 use tfhe::core_crypto::algorithms::polynomial_algorithms::*;
@@ -12,13 +9,13 @@ use crate::seeder::IdSeeder;
 pub struct Client {
     // parameters
     ip_param: GlweParameter<u64>,
-    br_param: GlweParameter<u32>,
+    br_param: GlweParameter<u8>,
 
     // key for encrypting templates and performing inner product
     glwe_sk_ip: GlweSecretKeyOwned<u64>,
     
     // key for blind rotation
-    glwe_sk_br: GlweSecretKeyOwned<u32>,
+    glwe_sk_br: GlweSecretKeyOwned<u8>,
 
     // global seed for masking templates
     id_seeder: IdSeeder,
@@ -27,13 +24,16 @@ pub struct Client {
     noise_seeder: Box<dyn Seeder>,
 
     // noise distribution
-    distribution: Gaussian<f64>,
+    distribution_ip: Gaussian<f64>,
+    distribution_br: Gaussian<f64>,
+
+    threshold: usize,
 }
 
 impl Client {
     /// Instantiate a new client with a default `thread_rng`.
     /// `ip_param` is for inner product, and `br_param` is for blind rotation
-    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u32>) -> Self {
+    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u8>) -> Self {
         let mut seeder = new_seeder();
         
         let mut secret_generator =
@@ -58,10 +58,34 @@ impl Client {
             br_param,
             glwe_sk_ip,
             glwe_sk_br,
-            distribution: Gaussian::from_dispersion_parameter(StandardDev(ip_param.std_dev), 0.0),
+            distribution_ip: Gaussian::from_dispersion_parameter(StandardDev(ip_param.std_dev), 0.0),
+            distribution_br: Gaussian::from_dispersion_parameter(StandardDev(br_param.std_dev), 0.0),
             id_seeder: IdSeeder::new(((rng.next_u64() as u128) << 64) | (rng.next_u64() as u128)),
             noise_seeder: seeder,
+            threshold: 0,
         }
+    }
+
+    pub fn new_lwe_public_key(&mut self) -> LwePublicKeyOwned<u8> {
+        let lwe_size = LweSize((self.br_param.glwe_size.0 - 1) * self.br_param.polynomial_size.0 + 1);
+        let ciphertext_modulus = CiphertextModulus::new_native();
+        let mut pk = LwePublicKey::new(0u8, lwe_size, LwePublicKeyZeroEncryptionCount(1), ciphertext_modulus);
+        let mut generator =  EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            self.noise_seeder.seed(),
+            self.noise_seeder.as_mut(),
+        );
+
+        generate_lwe_public_key(
+            &self.glwe_sk_br.as_lwe_secret_key(), 
+            &mut pk, 
+            self.distribution_br, 
+            &mut generator
+        );
+        pk
+    }
+
+    pub fn set_threshold(&mut self, threshold: usize) {
+        self.threshold = threshold;
     }
 
     /// Encrypt a new template with a given ID. The ciphertexts are GGSW ciphertexts but only body needs transferring.
@@ -166,7 +190,7 @@ impl Client {
             &self.glwe_sk_ip,
             &mut glwe,
             &plaintext_list,
-            self.distribution,
+            self.distribution_ip,
             &mut encryption_generator,
         );
 
@@ -174,9 +198,8 @@ impl Client {
     }
 
     /// Given a Glwe ciphertext and id for query, transform the current masks to blind rotation masks.
-    pub fn mask_transform(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) {
+    pub fn mask_transform(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> GlweCiphertextOwned<u8> {
         let ciphertext_modulus = CiphertextModulus::new_native();
-
         let mut glwe_ct_list = GlweCiphertextList::new(
             0, 
             self.ip_param.glwe_size, 
@@ -186,7 +209,7 @@ impl Client {
         );
 
         self.fill_with_template_masks(id, &mut glwe_ct_list);
-        let innerprod_body = glwe_ct_list
+        let masked_innerprod = glwe_ct_list
             .chunks_mut(self.ip_param.decomposition_level_count.0)
             .zip(glwe_ct.as_polynomial_list().iter())
             .fold(0u64, |sum_body, (mut glev_ct, poly)| {
@@ -207,16 +230,18 @@ impl Client {
                         let (mask, mut body) = ct.get_mut_mask_and_body();
                         let mut body = body.as_mut_polynomial();
 
+                        // TODO: can be accelerated by FFT
                         polynomial_wrapping_add_multisum_assign(
                             &mut body,
                             &mask.as_polynomial_list(),
                             &self.glwe_sk_ip.as_polynomial_list(),
                         );
 
+                        // compute the constant term of polynomial multiplication
                         let body_container = body.into_container();
                         let mut sum: u64 = poly_i[0] * body_container[0];
                         for (&vi, &vj) in poly_i[1..].iter().zip(body_container[1..].iter().rev()) {
-                            sum -= vi * vj;
+                            sum -= vi * vj;  // DEBUG
                         }
                         sum
                     })
@@ -225,9 +250,45 @@ impl Client {
                 sum_body + new_sum
             });
         
-        // TODO: Encrypt an GLWE for blind rotation
-        
-        
+        // somehow modulus switch
+        let masked_innerprod = (masked_innerprod >> (64 - 7)) as usize;
+
+        // lookup table where `mased_innerprod + [theta,N/2)` are assigned with 1, and others with 0
+        // Note that when modulo 2, -1 is regarded as one so the rotation is cyclic.
+        let br_polydim = self.br_param.polynomial_size.0;
+        let mut cleartext = vec![0u8; br_polydim];
+        for idx in self.threshold..br_polydim {
+            cleartext[(idx + masked_innerprod) % br_polydim] = self.br_param.delta;
+        }
+
+        let mut ct = GlweCiphertext::new(
+            0u8, 
+            self.br_param.glwe_size, 
+            self.br_param.polynomial_size, 
+            CiphertextModulus::new_native()
+        );
+
+        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            self.noise_seeder.seed(),
+            self.noise_seeder.as_mut(),
+        );
+
+        encrypt_glwe_ciphertext(
+            &self.glwe_sk_br, 
+            &mut ct, 
+            &PlaintextList::from_container(cleartext), 
+            self.distribution_ip, 
+            &mut encryption_generator
+        );
+
+        ct
+    }
+
+    pub fn decrypt_lwe(&self, lwe_ct: LweCiphertextOwned<u8>) -> u8 {
+        let pt = decrypt_lwe_ciphertext(&self.glwe_sk_br.as_lwe_secret_key(), &lwe_ct);
+
+        // either 0 or 1
+        (pt.0 as f32 / self.br_param.delta as f32).round() as u8
     }
 
     fn encode(&self, features: &[f32], scale: f32) -> Vec<u64> {
@@ -256,7 +317,7 @@ impl Client {
 
         generator.fill_slice_with_random_from_distribution_custom_mod(
             body.as_mut(),
-            self.distribution,
+            self.distribution_ip,
             ciphertext_modulus,
         );
 
