@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use rand::*;
 use tfhe::core_crypto::commons::generators::MaskRandomGenerator;
 use tfhe::core_crypto::prelude::*;
@@ -63,11 +65,30 @@ impl Client {
     }
 
     /// Encrypt a new template with a given ID. The ciphertexts are GGSW ciphertexts but only body needs transferring.
-    pub fn encrypt_new_template(&mut self, id: u128, features: &[f64]) -> Vec<GlweBody<Vec<u64>>> {
+    /// The layout of GGSW ciphertexts is 
+    ///     Glev { poly * s_0 }
+    ///     Glev { poly * s_1 }
+    ///     ...
+    ///     Glev { poly }
+    pub fn encrypt_new_template(&mut self, id: u128, features: &[f32], scale: f32) -> Vec<GlweBody<Vec<u64>>> {
         let ciphertext_modulus = CiphertextModulus::new_native();
+
+        // cleartext for GGSW ciphertexts
+        let cleartext: Vec<_> = features
+            .iter()
+            .map(|&v| {
+                let v = (v * scale).round() as i64;
+                if v >= 0 {
+                    v as u64
+                } else {
+                    (self.ip_param.plaintext_modulus as i64 + v) as u64
+                }
+            })
+            .collect();
+        let clearpoly = Polynomial::from_container(cleartext);
+
         let mut generator = RandomGenerator::<ActivatedRandomGenerator>::new(
             self.noise_seeder.seed(),
-            // seeder.as_mut(),
         );
 
         let mut glwe_ct_list = GlweCiphertextList::new(
@@ -81,17 +102,145 @@ impl Client {
         self.fill_with_template_masks(id, &mut glwe_ct_list);
 
         glwe_ct_list
-            .iter_mut()
-            .map(|mut ct| {
-                // TODO: encode
-                let pt = PlaintextListOwned::from_container(vec![]);
+            .chunks_mut(self.ip_param.decomposition_level_count.0)
+            .enumerate()
+            .flat_map(|(glev_idx, mut chunk)| {
+                // poly * s
+                let mut clearpoly_s = clearpoly.clone();
+                if glev_idx + 1 < self.ip_param.glwe_size.0 {
+                    polynomial_wrapping_mul(
+                        &mut clearpoly_s, 
+                        &clearpoly, 
+                        &self.glwe_sk_ip.as_polynomial_list().get(glev_idx)
+                    );
+                }
 
-                self.encrypt_with_existed_masks(&mut ct, pt, &mut generator);
+                // each chunk is a Glev ciphertext
+                chunk.iter_mut()
+                    .enumerate()
+                    .map(|(beta_idx, mut glwe_ct)| {
+                        // poly * beta_i * s
+                        let idx = self.ip_param.decomposition_level_count.0 - beta_idx;
+                        let mut clearpoly_beta_s = clearpoly_s.clone();
+                        clearpoly_beta_s.iter_mut()
+                            .for_each(|v| {
+                                *v <<= self.ip_param.decomposition_base_log.0 * idx;
+                                // negate
+                                if glev_idx + 1 < self.ip_param.glwe_size.0 {
+                                    *v = !(*v) + 1;
+                                }
+                            });
 
-                GlweBody::from_container(
-                    ct.get_body().as_polynomial().into_container().iter().copied().collect::<Vec<_>>(), 
-                    ciphertext_modulus
-                )
+                        self.encrypt_with_existed_masks(&mut glwe_ct, clearpoly_beta_s, &mut generator);
+
+                        GlweBody::from_container(
+                            glwe_ct.get_body().as_polynomial().into_container().iter().copied().collect::<Vec<_>>(), 
+                            ciphertext_modulus
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()    
+            })
+            .collect()
+    }
+
+    /// Encrypt a new Glwe Ciphertext for inner product
+    pub fn encrypt_glwe(&mut self, features: &[f32], scale: f32) -> GlweCiphertextOwned<u64> {
+        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            self.noise_seeder.seed(),
+            self.noise_seeder.as_mut(),
+        );
+
+        let ciphertext_modulus = CiphertextModulus::new_native();
+        let mut glwe = GlweCiphertext::new(
+            0u64,
+            self.ip_param.glwe_size,
+            self.ip_param.polynomial_size,
+            ciphertext_modulus,
+        );
+
+        let msgs = self.encode(features, scale);
+        let plaintext_list = PlaintextList::from_container(msgs);
+
+        encrypt_glwe_ciphertext(
+            &self.glwe_sk_ip,
+            &mut glwe,
+            &plaintext_list,
+            self.distribution,
+            &mut encryption_generator,
+        );
+
+        glwe
+    }
+
+    /// Given a Glwe ciphertext and id for query, transform the current masks to blind rotation masks.
+    pub fn mask_transform(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) {
+        let ciphertext_modulus = CiphertextModulus::new_native();
+
+        let mut glwe_ct_list = GlweCiphertextList::new(
+            0, 
+            self.ip_param.glwe_size, 
+            self.ip_param.polynomial_size, 
+            GlweCiphertextCount(self.ip_param.decomposition_level_count.0 * self.ip_param.glwe_size.0), 
+            ciphertext_modulus
+        );
+
+        self.fill_with_template_masks(id, &mut glwe_ct_list);
+        let innerprod_body = glwe_ct_list
+            .chunks_mut(self.ip_param.decomposition_level_count.0)
+            .zip(glwe_ct.as_polynomial_list().iter())
+            .fold(0u64, |sum_body, (mut glev_ct, poly)| {
+                let new_sum: u64 = glev_ct
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(beta_idx, mut ct)| {
+                        let idx = self.ip_param.decomposition_level_count.0 - beta_idx;
+                        let poly_i: Vec<_> = poly
+                            .into_container()
+                            .iter()
+                            .map(|&v| {
+                                // decompose
+                                let v = v >> self.ip_param.decomposition_base_log.0 * idx;
+                                v & ((1u64 << self.ip_param.decomposition_base_log.0) - 1)
+                            })
+                            .collect();
+                        let (mask, mut body) = ct.get_mut_mask_and_body();
+                        let mut body = body.as_mut_polynomial();
+
+                        polynomial_wrapping_add_multisum_assign(
+                            &mut body,
+                            &mask.as_polynomial_list(),
+                            &self.glwe_sk_ip.as_polynomial_list(),
+                        );
+
+                        let body_container = body.into_container();
+                        let mut sum: u64 = poly_i[0] * body_container[0];
+                        for (&vi, &vj) in poly_i[1..].iter().zip(body_container[1..].iter().rev()) {
+                            sum -= vi * vj;
+                        }
+                        sum
+                    })
+                    .sum();
+
+                sum_body + new_sum
+            });
+        
+        // TODO: Encrypt an GLWE for blind rotation
+        
+        
+    }
+
+    fn encode(&self, features: &[f32], scale: f32) -> Vec<u64> {
+        features
+            .iter()
+            .map(|&v| {
+                let v = (v * scale).round() as i64;
+                if v >= 0 {
+                    v as u64 * self.ip_param.delta
+                } else {
+                    let t_minus_v = self.ip_param.plaintext_modulus as i64 + v as i64;
+                    t_minus_v as u64 * self.ip_param.delta
+                }
             })
             .collect()
     }
@@ -99,7 +248,7 @@ impl Client {
     fn encrypt_with_existed_masks<G>(
         &mut self, 
         glwe_ct: &mut GlweCiphertextMutView<u64>, 
-        pt: PlaintextListOwned<u64>, 
+        pt_poly: PolynomialOwned<u64>, 
         generator: &mut RandomGenerator<G>
     ) where G : ByteRandomGenerator {
         let ciphertext_modulus = CiphertextModulus::new_native();
@@ -113,7 +262,7 @@ impl Client {
 
         polynomial_wrapping_add_assign(
             &mut body.as_mut_polynomial(),
-            &pt.as_polynomial(),
+            &pt_poly,
         );
 
         polynomial_wrapping_add_multisum_assign(
