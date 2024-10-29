@@ -13,6 +13,8 @@ pub struct Server {
     lwe_pk: LwePublicKeyOwned<u32>,
 
     seeder: Box<dyn Seeder>,
+
+    precision: usize,
 }
 
 impl Server {
@@ -30,6 +32,7 @@ impl Server {
             database: BTreeMap::new(),
             lwe_pk: lwe_pk_u32,
             seeder: new_seeder(),
+            precision: 8,
         }
     }
 
@@ -37,7 +40,7 @@ impl Server {
         self.database.insert(id, template_bodies);
     }
 
-    pub fn verify(&mut self, id: u128, query_ct: GlweCiphertextOwned<u64>, lut_ct: GlweCiphertextOwned<u8>) -> Option<LweCiphertextOwned<u8>> {
+    pub fn verify(&mut self, id: u128, query_ct: GlweCiphertextOwned<u64>, lut_ct: GlweCiphertextListOwned<u8>) -> Option<LweCiphertextOwned<u8>> {
         match self.database.get(&id) {
             None => None,
             Some(template_ggsw_bodies) => {
@@ -76,18 +79,19 @@ impl Server {
 
                 #[cfg(feature = "debug")]
                 println!("inner prod body: {}", innerprod_body);
-                let log2_polydim = 7usize;
-                let carry = innerprod_body & (1 << (63 - log2_polydim));
-                let innerprod_body = u64::wrapping_add(innerprod_body >> (64 - log2_polydim), carry >> (63 - log2_polydim));
+                let carry = innerprod_body & (1 << (63 - self.precision));
+                let innerprod_body = u64::wrapping_add(innerprod_body >> (64 - self.precision), carry >> (63 - self.precision));
                 #[cfg(feature = "debug")]
                 println!("truncated inner prod body: {}", innerprod_body);
 
+                let ct_idx = innerprod_body as usize / self.br_param.polynomial_size.0;
+                let glwe_idx = innerprod_body as usize % self.br_param.polynomial_size.0;
                 let mut output_lwe = LweCiphertextOwned::new(
                     0, 
                     LweSize((self.br_param.glwe_size.0 - 1) * self.br_param.polynomial_size.0 + 1), 
                     CiphertextModulus::new_native()
                 );
-                extract_lwe_sample_from_glwe_ciphertext(&lut_ct, &mut output_lwe, MonomialDegree(innerprod_body as usize));
+                extract_lwe_sample_from_glwe_ciphertext(&lut_ct.get(ct_idx), &mut output_lwe, MonomialDegree(glwe_idx));
 
                 let zero_mask = self.new_zero_encryption();
                 output_lwe.as_mut().iter_mut().zip(zero_mask.into_container().into_iter()).for_each(|(ct_v, z_v)| {

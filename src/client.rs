@@ -27,7 +27,8 @@ pub struct Client {
     distribution_ip: Gaussian<f64>,
     distribution_br: Gaussian<f64>,
 
-    threshold: usize,  // always assume threshold to be non-negative
+    threshold: usize,  // always assume threshold to be non-negative in the current implementations
+    precision: usize,
 }
 
 impl Client {
@@ -63,6 +64,7 @@ impl Client {
             id_seeder: IdSeeder::new(((rng.next_u64() as u128) << 64) | (rng.next_u64() as u128)),
             noise_seeder: seeder,
             threshold: 0,
+            precision: 8,  // [-128, 127]
         }
     }
 
@@ -84,8 +86,8 @@ impl Client {
         pk
     }
 
-    pub fn set_threshold(&mut self, threshold: usize) {
-        self.threshold = threshold;
+    pub fn set_threshold(&mut self, threshold: f32) {
+        self.threshold = (threshold * ((1 << self.precision) as f32)).round() as usize;
     }
 
     /// Encrypt a new template with a given ID. The ciphertexts are GGSW ciphertexts but only body needs transferring.
@@ -202,7 +204,7 @@ impl Client {
     }
 
     /// Given a Glwe ciphertext and id for query, transform the current masks to blind rotation masks.
-    pub fn transform_mask(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> GlweCiphertextOwned<u8> {
+    pub fn transform_mask(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> GlweCiphertextListOwned<u8> {
         let ciphertext_modulus = CiphertextModulus::new_native();
         let mut glwe_ct_list = GlweCiphertextList::new(
             0, 
@@ -213,7 +215,7 @@ impl Client {
         );
 
         self.fill_with_template_masks(id, &mut glwe_ct_list);
-        let masked_innerprod = glwe_ct_list
+        let masks_for_innerprod = glwe_ct_list
             .chunks_mut(self.ip_param.decomposition_level_count.0)
             .zip(glwe_ct.as_polynomial_list().iter())
             .fold(0u64, |sum_body, (mut glev_ct, poly)| {
@@ -256,28 +258,28 @@ impl Client {
             });
         
         #[cfg(feature = "debug")]
-        println!("masked inner prod: {}", masked_innerprod);
-        // somehow modulus switch
-        let log2_polydim = 7usize;
-        let carry = masked_innerprod & (1 << (63 - log2_polydim));
-        let masked_innerprod = u64::wrapping_add(masked_innerprod >> (64 - log2_polydim), carry >> (63 - log2_polydim));
+        println!("masks for inner prod: {}", masks_for_innerprod);
+        // somehow modulus switch, yet noiseless
+        let carry = masks_for_innerprod & (1 << (63 - self.precision));
+        let masks_for_innerprod = u64::wrapping_add(masks_for_innerprod >> (64 - self.precision), carry >> (63 - self.precision));
         #[cfg(feature = "debug")]
-        println!("truncated masked innerprod: {}", masked_innerprod);
+        println!("truncated masked innerprod: {}", masks_for_innerprod);
 
         // lookup table where `mased_innerprod + [theta,N/2)` are assigned with 1, and others with 0
         // Note that when modulo 2, -1 is regarded as one so the rotation is cyclic.
-        let br_polydim = self.br_param.polynomial_size.0;
+        let br_polydim = 1 << self.precision;
         let mut cleartext = vec![0u8; br_polydim];
         for idx in self.threshold..(br_polydim/2) {
-            cleartext[(idx + br_polydim - masked_innerprod as usize) % br_polydim] = self.br_param.delta;
+            cleartext[(idx + br_polydim - masks_for_innerprod as usize) % br_polydim] = self.br_param.delta;
         }
         #[cfg(feature = "debug")]
         println!("rotation cleartext {:?}", cleartext);
 
-        let mut ct = GlweCiphertext::new(
-            0u8, 
+        let mut cts = GlweCiphertextList::new(
+            0, 
             self.br_param.glwe_size, 
             self.br_param.polynomial_size, 
+            GlweCiphertextCount((1 << self.precision) / self.br_param.polynomial_size.0), 
             CiphertextModulus::new_native()
         );
 
@@ -286,15 +288,15 @@ impl Client {
             self.noise_seeder.as_mut(),
         );
 
-        encrypt_glwe_ciphertext(
+        encrypt_glwe_ciphertext_list(
             &self.glwe_sk_br, 
-            &mut ct, 
+            &mut cts, 
             &PlaintextList::from_container(cleartext), 
-            self.distribution_ip, 
+            self.distribution_br, 
             &mut encryption_generator
         );
 
-        ct
+        cts
     }
 
     pub fn decrypt_lwe(&self, lwe_ct: LweCiphertextOwned<u8>) -> u8 {
