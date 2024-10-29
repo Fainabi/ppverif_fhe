@@ -9,21 +9,21 @@ pub fn main() {
     // features
     let mut f1 = vec![0f32; 512];
     let mut f2 = vec![0f32; 512];
-    f1[0] = 1f32;
-    f2[511] = 1f32;
+    f1[1] = 1f32;
+    f2[511] = -0.2f32;
 
     // enrollment
-    let template = client.encrypt_new_template(0, &f1, 1.0);
+    let template = client.encrypt_new_template(0, &f1, 512.0);
     server.enroll(0, template);
 
     // verification
     let now = Instant::now();
-    let query_ct = client.encrypt_glwe(&f2, 1.0);
+    let query_ct = client.encrypt_glwe(&f2, 512.0);
     let elapsed = now.elapsed();
     println!("Encrypting query ct {} micros", elapsed.as_nanos() as f32 / 1000.0);
 
     let now = Instant::now();
-    let lut_ct = client.mask_transform(0, query_ct.as_view());
+    let lut_ct = client.transform_mask(0, query_ct.as_view());
     let elapsed = now.elapsed();
     println!("Generate lookup table: {} micros", elapsed.as_nanos() as f32 / 1000.0);
 

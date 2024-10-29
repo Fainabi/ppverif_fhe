@@ -27,7 +27,7 @@ pub struct Client {
     distribution_ip: Gaussian<f64>,
     distribution_br: Gaussian<f64>,
 
-    threshold: usize,
+    threshold: usize,  // always assume threshold to be non-negative
 }
 
 impl Client {
@@ -123,8 +123,10 @@ impl Client {
             ciphertext_modulus
         );
 
+        // id as a seed for generating masks of GGSW ciphertexts
         self.fill_with_template_masks(id, &mut glwe_ct_list);
 
+        // computes the body of GGSW ciphertexts
         glwe_ct_list
             .chunks_mut(self.ip_param.decomposition_level_count.0)
             .enumerate()
@@ -148,10 +150,12 @@ impl Client {
                         let mut clearpoly_beta_s = clearpoly_s.clone();
                         clearpoly_beta_s.iter_mut()
                             .for_each(|v| {
+                                // encode to the MSB
                                 *v <<= self.ip_param.decomposition_base_log.0 * idx;
-                                // negate
+
+                                // negate if Glev for masks
                                 if glev_idx + 1 < self.ip_param.glwe_size.0 {
-                                    *v = !(*v) + 1;
+                                    *v = u64::wrapping_add(!(*v), 1);
                                 }
                             });
 
@@ -198,7 +202,7 @@ impl Client {
     }
 
     /// Given a Glwe ciphertext and id for query, transform the current masks to blind rotation masks.
-    pub fn mask_transform(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> GlweCiphertextOwned<u8> {
+    pub fn transform_mask(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> GlweCiphertextOwned<u8> {
         let ciphertext_modulus = CiphertextModulus::new_native();
         let mut glwe_ct_list = GlweCiphertextList::new(
             0, 
@@ -223,7 +227,7 @@ impl Client {
                             .iter()
                             .map(|&v| {
                                 // decompose
-                                let v = v >> self.ip_param.decomposition_base_log.0 * idx;
+                                let v = v >> (self.ip_param.decomposition_base_log.0 * idx);
                                 v & ((1u64 << self.ip_param.decomposition_base_log.0) - 1)
                             })
                             .collect();
@@ -231,7 +235,8 @@ impl Client {
                         let mut body = body.as_mut_polynomial();
 
                         // TODO: can be accelerated by FFT
-                        polynomial_wrapping_add_multisum_assign(
+                        // GLWE ciphertexts are in the form of (a, <a,s>+m), so decryption is subtracting to the body
+                        polynomial_wrapping_sub_multisum_assign(
                             &mut body,
                             &mask.as_polynomial_list(),
                             &self.glwe_sk_ip.as_polynomial_list(),
@@ -239,27 +244,35 @@ impl Client {
 
                         // compute the constant term of polynomial multiplication
                         let body_container = body.into_container();
-                        let mut sum: u64 = poly_i[0] * body_container[0];
+                        let mut sum: u64 = poly_i[0].wrapping_mul(body_container[0]);
                         for (&vi, &vj) in poly_i[1..].iter().zip(body_container[1..].iter().rev()) {
-                            sum -= vi * vj;  // DEBUG
+                            sum = sum.wrapping_sub(vi.wrapping_mul(vj));
                         }
                         sum
                     })
-                    .sum();
+                    .fold(0u64, |acc, x| acc.wrapping_add(x));
 
-                sum_body + new_sum
+                sum_body.wrapping_add(new_sum)
             });
         
+        #[cfg(feature = "debug")]
+        println!("masked inner prod: {}", masked_innerprod);
         // somehow modulus switch
-        let masked_innerprod = (masked_innerprod >> (64 - 7)) as usize;
+        let log2_polydim = 7usize;
+        let carry = masked_innerprod & (1 << (63 - log2_polydim));
+        let masked_innerprod = u64::wrapping_add(masked_innerprod >> (64 - log2_polydim), carry >> (63 - log2_polydim));
+        #[cfg(feature = "debug")]
+        println!("truncated masked innerprod: {}", masked_innerprod);
 
         // lookup table where `mased_innerprod + [theta,N/2)` are assigned with 1, and others with 0
         // Note that when modulo 2, -1 is regarded as one so the rotation is cyclic.
         let br_polydim = self.br_param.polynomial_size.0;
         let mut cleartext = vec![0u8; br_polydim];
-        for idx in self.threshold..br_polydim {
-            cleartext[(idx + masked_innerprod) % br_polydim] = self.br_param.delta;
+        for idx in self.threshold..(br_polydim/2) {
+            cleartext[(idx + br_polydim - masked_innerprod as usize) % br_polydim] = self.br_param.delta;
         }
+        #[cfg(feature = "debug")]
+        println!("rotation cleartext {:?}", cleartext);
 
         let mut ct = GlweCiphertext::new(
             0u8, 
@@ -297,10 +310,10 @@ impl Client {
             .map(|&v| {
                 let v = (v * scale).round() as i64;
                 if v >= 0 {
-                    v as u64 * self.ip_param.delta
+                    u64::wrapping_mul(v as u64, self.ip_param.delta)
                 } else {
                     let t_minus_v = self.ip_param.plaintext_modulus as i64 + v as i64;
-                    t_minus_v as u64 * self.ip_param.delta
+                    u64::wrapping_mul(t_minus_v as u64, self.ip_param.delta)
                 }
             })
             .collect()
@@ -326,6 +339,7 @@ impl Client {
             &pt_poly,
         );
 
+        // (a, <a,s> + m)
         polynomial_wrapping_add_multisum_assign(
             &mut body.as_mut_polynomial(),
             &mask.as_polynomial_list(),

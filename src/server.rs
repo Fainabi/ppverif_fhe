@@ -60,31 +60,38 @@ impl Server {
                                     .zip(query_container.iter().take(1).chain(query_container[1..].iter().rev()))
                                     .enumerate()
                                 {
-                                    let wi = wi >> self.ip_param.decomposition_base_log.0 * idx;
+                                    let wi = wi >> (self.ip_param.decomposition_base_log.0 * idx);
                                     let wi = wi & ((1u64 << self.ip_param.decomposition_base_log.0) - 1);
                                     if poly_i == 0 {
-                                        sum += vi * wi;
+                                        sum = sum.wrapping_add(vi.wrapping_mul(wi));
                                     } else {
-                                        sum -= vi * wi;
+                                        sum = sum.wrapping_sub(vi.wrapping_mul(wi));
                                     }
                                 }
 
                                 sum
                             })
                     })
-                    .sum();
+                    .fold(0u64, |acc, x| acc.wrapping_add(x));
 
-                let innerprod_body = (innerprod_body >> (64 - 7)) as usize;
+                #[cfg(feature = "debug")]
+                println!("inner prod body: {}", innerprod_body);
+                let log2_polydim = 7usize;
+                let carry = innerprod_body & (1 << (63 - log2_polydim));
+                let innerprod_body = u64::wrapping_add(innerprod_body >> (64 - log2_polydim), carry >> (63 - log2_polydim));
+                #[cfg(feature = "debug")]
+                println!("truncated inner prod body: {}", innerprod_body);
+
                 let mut output_lwe = LweCiphertextOwned::new(
                     0, 
                     LweSize((self.br_param.glwe_size.0 - 1) * self.br_param.polynomial_size.0 + 1), 
                     CiphertextModulus::new_native()
                 );
-                extract_lwe_sample_from_glwe_ciphertext(&lut_ct, &mut output_lwe, MonomialDegree(innerprod_body));
+                extract_lwe_sample_from_glwe_ciphertext(&lut_ct, &mut output_lwe, MonomialDegree(innerprod_body as usize));
 
                 let zero_mask = self.new_zero_encryption();
                 output_lwe.as_mut().iter_mut().zip(zero_mask.into_container().into_iter()).for_each(|(ct_v, z_v)| {
-                    *ct_v += z_v;
+                    *ct_v = u8::wrapping_add(*ct_v, z_v);
                 });
                 Some(output_lwe)
             }
