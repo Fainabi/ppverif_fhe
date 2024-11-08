@@ -5,6 +5,7 @@ use crate::params::*;
 pub struct Server {
     ip_param: GlweParameter<u64>,
     br_param: GlweParameter<u8>,
+    mal_param: GlweParameter<u32>,
 
     // any data structure
     database: BTreeMap<u128, Vec<GlweBody<Vec<u64>>>>,
@@ -18,7 +19,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u8>, lwe_pk: LwePublicKeyOwned<u8>) -> Self {
+    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u8>, mal_param: GlweParameter<u32>, lwe_pk: LwePublicKeyOwned<u8>) -> Self {
         let lwe_size = lwe_pk.lwe_size();
         let lwe_pk_u32 = LwePublicKeyOwned::from_container(
             lwe_pk.into_container().into_iter().map(|v| v as u32).collect::<Vec<_>>(), 
@@ -29,6 +30,7 @@ impl Server {
         Self {
             ip_param,
             br_param,
+            mal_param,
             database: BTreeMap::new(),
             lwe_pk: lwe_pk_u32,
             seeder: new_seeder(),

@@ -2,9 +2,9 @@ use ppverif_fhe::*;
 use std::time::Instant;
 
 pub fn main() {
-    let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER);
+    let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, DEFAULT_MALICIOUS_ROTATION_PARAMETER);
     let pk = client.new_lwe_public_key();
-    let mut server = Server::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, pk);
+    let mut server = Server::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, DEFAULT_MALICIOUS_ROTATION_PARAMETER, pk);
 
     // features
     let mut f1 = vec![0f32; 512];

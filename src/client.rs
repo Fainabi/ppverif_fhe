@@ -10,12 +10,16 @@ pub struct Client {
     // parameters
     ip_param: GlweParameter<u64>,
     br_param: GlweParameter<u8>,
+    mal_param: GlweParameter<u32>,
 
     // key for encrypting templates and performing inner product
     glwe_sk_ip: GlweSecretKeyOwned<u64>,
     
     // key for blind rotation
     glwe_sk_br: GlweSecretKeyOwned<u8>,
+
+    // key for malicious blind rotation
+    glwe_sk_mal: GlweSecretKeyOwned<u32>,
 
     // global seed for masking templates
     id_seeder: IdSeeder,
@@ -34,7 +38,7 @@ pub struct Client {
 impl Client {
     /// Instantiate a new client with a default `thread_rng`.
     /// `ip_param` is for inner product, and `br_param` is for blind rotation
-    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u8>) -> Self {
+    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u8>, mal_param: GlweParameter<u32>) -> Self {
         let mut seeder = new_seeder();
         
         let mut secret_generator =
@@ -52,13 +56,22 @@ impl Client {
             &mut secret_generator,
         );
 
+        let glwe_sk_mal = GlweSecretKey::generate_new_binary(
+            GlweDimension(mal_param.glwe_size.0 - 1),
+            mal_param.polynomial_size,
+            &mut secret_generator,
+        );
+
+
         let mut rng = thread_rng();
 
         Self {
             ip_param,
             br_param,
+            mal_param,
             glwe_sk_ip,
             glwe_sk_br,
+            glwe_sk_mal,
             distribution_ip: Gaussian::from_dispersion_parameter(StandardDev(ip_param.std_dev), 0.0),
             distribution_br: Gaussian::from_dispersion_parameter(StandardDev(br_param.std_dev), 0.0),
             id_seeder: IdSeeder::new(((rng.next_u64() as u128) << 64) | (rng.next_u64() as u128)),
@@ -205,12 +218,80 @@ impl Client {
 
     /// Given a Glwe ciphertext and id for query, transform the current masks to blind rotation masks.
     pub fn transform_mask(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> GlweCiphertextListOwned<u8> {
+        let masks_for_innerprod = self.transform_mask_to_body(id, glwe_ct);
+
+        // lookup table where `mased_innerprod + [theta,N/2)` are assigned with 1, and others with 0
+        // Note that when modulo 2, -1 is regarded as one so the rotation is cyclic.
+        let br_polydim = 1 << self.precision;
+        let mut cleartext = vec![0u8; br_polydim];
+        for idx in self.threshold..(br_polydim/2) {
+            cleartext[(idx + br_polydim - masks_for_innerprod as usize) % br_polydim] = self.br_param.delta;
+        }
+        #[cfg(feature = "debug")]
+        println!("rotation cleartext {:?}", cleartext);
+
+        let mut cts = GlweCiphertextList::new(
+            0,
+            self.br_param.glwe_size,
+            self.br_param.polynomial_size,
+            GlweCiphertextCount((1 << self.precision) / self.br_param.polynomial_size.0),
+            CiphertextModulus::new_native()
+        );
+
+        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            self.noise_seeder.seed(),
+            self.noise_seeder.as_mut(),
+        );
+
+        encrypt_glwe_ciphertext_list(
+            &self.glwe_sk_br,
+            &mut cts,
+            &PlaintextList::from_container(cleartext),
+            self.distribution_br,
+            &mut encryption_generator
+        );
+
+        cts
+    }
+
+    /// Create a Glwe ciphertext encrypting a monomial
+    /// The server verifies that the encrypted message is $X^b$ by two tests:
+    ///     1. (monomial) ct acts on [1,1,...,1] would yield [1,1,...,1]
+    ///     2. (faithful) ct acts on [0,1,...,n-1] would yield $b$ at the constant part
+    pub fn transform_mask_to_Glwe(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> GlweCiphertextOwned<u32> {
+        let mut ct = GlweCiphertext::new(
+            0,
+            self.mal_param.glwe_size,
+            self.mal_param.polynomial_size,
+            CiphertextModulus::new_native()
+        );
+
+        let masks_for_innerprod = self.transform_mask_to_body(id, glwe_ct);
+        let br_polydim = 1usize << self.precision;
+        let mut cleartext = vec![0; self.mal_param.polynomial_size.0];
+
+        // monomial
+        cleartext[(br_polydim - masks_for_innerprod as usize) % br_polydim] = self.mal_param.delta;
+
+        ct
+    }
+
+
+    pub fn decrypt_lwe(&self, lwe_ct: LweCiphertextOwned<u8>) -> u8 {
+        let pt = decrypt_lwe_ciphertext(&self.glwe_sk_br.as_lwe_secret_key(), &lwe_ct);
+
+        // either 0 or 1
+        (pt.0 as f32 / self.br_param.delta as f32).round() as u8
+    }
+
+
+    fn transform_mask_to_body(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> u64 {
         let ciphertext_modulus = CiphertextModulus::new_native();
         let mut glwe_ct_list = GlweCiphertextList::new(
-            0, 
-            self.ip_param.glwe_size, 
-            self.ip_param.polynomial_size, 
-            GlweCiphertextCount(self.ip_param.decomposition_level_count.0 * self.ip_param.glwe_size.0), 
+            0,
+            self.ip_param.glwe_size,
+            self.ip_param.polynomial_size,
+            GlweCiphertextCount(self.ip_param.decomposition_level_count.0 * self.ip_param.glwe_size.0),
             ciphertext_modulus
         );
 
@@ -256,7 +337,7 @@ impl Client {
 
                 sum_body.wrapping_add(new_sum)
             });
-        
+
         #[cfg(feature = "debug")]
         println!("masks for inner prod: {}", masks_for_innerprod);
         // somehow modulus switch, yet noiseless
@@ -265,47 +346,9 @@ impl Client {
         #[cfg(feature = "debug")]
         println!("truncated masked innerprod: {}", masks_for_innerprod);
 
-        // lookup table where `mased_innerprod + [theta,N/2)` are assigned with 1, and others with 0
-        // Note that when modulo 2, -1 is regarded as one so the rotation is cyclic.
-        let br_polydim = 1 << self.precision;
-        let mut cleartext = vec![0u8; br_polydim];
-        for idx in self.threshold..(br_polydim/2) {
-            cleartext[(idx + br_polydim - masks_for_innerprod as usize) % br_polydim] = self.br_param.delta;
-        }
-        #[cfg(feature = "debug")]
-        println!("rotation cleartext {:?}", cleartext);
-
-        let mut cts = GlweCiphertextList::new(
-            0, 
-            self.br_param.glwe_size, 
-            self.br_param.polynomial_size, 
-            GlweCiphertextCount((1 << self.precision) / self.br_param.polynomial_size.0), 
-            CiphertextModulus::new_native()
-        );
-
-        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
-            self.noise_seeder.seed(),
-            self.noise_seeder.as_mut(),
-        );
-
-        encrypt_glwe_ciphertext_list(
-            &self.glwe_sk_br, 
-            &mut cts, 
-            &PlaintextList::from_container(cleartext), 
-            self.distribution_br, 
-            &mut encryption_generator
-        );
-
-        cts
+        masks_for_innerprod
     }
-
-    pub fn decrypt_lwe(&self, lwe_ct: LweCiphertextOwned<u8>) -> u8 {
-        let pt = decrypt_lwe_ciphertext(&self.glwe_sk_br.as_lwe_secret_key(), &lwe_ct);
-
-        // either 0 or 1
-        (pt.0 as f32 / self.br_param.delta as f32).round() as u8
-    }
-
+    
     fn encode(&self, features: &[f32], scale: f32) -> Vec<u64> {
         features
             .iter()

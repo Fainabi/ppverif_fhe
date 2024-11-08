@@ -32,4 +32,12 @@ pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u8> = GlweParameter {
     decomposition_level_count: DecompositionLevelCount(1),  // unused
 };
 
-
+pub const DEFAULT_MALICIOUS_ROTATION_PARAMETER: GlweParameter<u32> = GlweParameter {
+    glwe_size: GlweSize(4),
+    polynomial_size: PolynomialSize(256),
+    std_dev: 0.00000000000000029403601535432533,
+    plaintext_modulus: 2,
+    delta: 1 << 23,
+    decomposition_base_log: DecompositionBaseLog(16),
+    decomposition_level_count: DecompositionLevelCount(1),
+};
