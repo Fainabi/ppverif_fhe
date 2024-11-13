@@ -43,7 +43,54 @@ impl Server {
     }
 
     pub fn verify(&mut self, id: u128, query_ct: GlweCiphertextOwned<u64>, lut_ct: GlweCiphertextListOwned<u8>) -> Option<LweCiphertextOwned<u8>> {
-        match self.database.get(&id) {
+        match self.compute_innerprod_body(id, query_ct) {
+            None => None,
+            Some(innerprod_body) => {
+                let ct_idx = innerprod_body as usize / self.br_param.polynomial_size.0;
+                let glwe_idx = innerprod_body as usize % self.br_param.polynomial_size.0;
+                let mut output_lwe = LweCiphertextOwned::new(
+                    0, 
+                    LweSize((self.br_param.glwe_size.0 - 1) * self.br_param.polynomial_size.0 + 1), 
+                    CiphertextModulus::new_native()
+                );
+                extract_lwe_sample_from_glwe_ciphertext(&lut_ct.get(ct_idx), &mut output_lwe, MonomialDegree(glwe_idx));
+
+                let zero_mask = self.new_zero_encryption();
+                output_lwe.as_mut().iter_mut().zip(zero_mask.into_container().into_iter()).for_each(|(ct_v, z_v)| {
+                    *ct_v = u8::wrapping_add(*ct_v, z_v);
+                });
+                Some(output_lwe)
+            }
+        }
+    }
+
+    pub fn verify_mal(&mut self, id: u128, query_ct: GlweCiphertextOwned<u64>, act_ct: GlweCiphertextOwned<u32>) -> Option<GlweCiphertextOwned<u32>> {
+        match self.compute_innerprod_body(id, query_ct) {
+            None => None,
+            Some(innerprod_body) => {
+                // construct inner prod lookup table
+                let mut ip_lut = (0..self.mal_param.polynomial_size.0)
+                    .map(|i| i as u32)
+                    .collect::<Vec<_>>();
+
+                // construct comparison lookup table
+                let mut lut = vec![0; self.mal_param.polynomial_size.0];
+
+                // act on the inner prod lookup table
+
+                // verifying monomial
+
+                // act on comparison lookup table
+
+
+                None
+            }
+        }
+
+    }
+
+    fn compute_innerprod_body(&mut self, id: u128, query_ct: GlweCiphertextOwned<u64>) -> Option<u64> {
+         match self.database.get(&id) {
             None => None,
             Some(template_ggsw_bodies) => {
                 let innerprod_body: u64 = template_ggsw_bodies
@@ -86,22 +133,10 @@ impl Server {
                 #[cfg(feature = "debug")]
                 println!("truncated inner prod body: {}", innerprod_body);
 
-                let ct_idx = innerprod_body as usize / self.br_param.polynomial_size.0;
-                let glwe_idx = innerprod_body as usize % self.br_param.polynomial_size.0;
-                let mut output_lwe = LweCiphertextOwned::new(
-                    0, 
-                    LweSize((self.br_param.glwe_size.0 - 1) * self.br_param.polynomial_size.0 + 1), 
-                    CiphertextModulus::new_native()
-                );
-                extract_lwe_sample_from_glwe_ciphertext(&lut_ct.get(ct_idx), &mut output_lwe, MonomialDegree(glwe_idx));
-
-                let zero_mask = self.new_zero_encryption();
-                output_lwe.as_mut().iter_mut().zip(zero_mask.into_container().into_iter()).for_each(|(ct_v, z_v)| {
-                    *ct_v = u8::wrapping_add(*ct_v, z_v);
-                });
-                Some(output_lwe)
+                Some(innerprod_body)
             }
         }
+
     }
 
     fn new_zero_encryption(&mut self) -> LweCiphertextOwned<u8> {
