@@ -1,3 +1,5 @@
+use aligned_vec::ABox;
+use concrete_fft::c64;
 use tfhe::core_crypto::prelude::*;
 
 #[derive(Debug, Copy, Clone)]
@@ -41,3 +43,5 @@ pub const DEFAULT_MALICIOUS_ROTATION_PARAMETER: GlweParameter<u32> = GlweParamet
     decomposition_base_log: DecompositionBaseLog(16),
     decomposition_level_count: DecompositionLevelCount(1),
 };
+
+pub type FourierGgswCiphertextOwned = FourierGgswCiphertext<ABox<[c64]>>;
