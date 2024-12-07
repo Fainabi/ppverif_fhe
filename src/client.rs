@@ -79,7 +79,7 @@ impl Client {
             noise_seeder: seeder,
             threshold: 0,
             precision: 8,  // [-128, 127]
-            mal_precision: 48,  // > 2 * 19
+            mal_precision: 16,
         }
     }
 
@@ -251,7 +251,10 @@ impl Client {
 
     /// Given a Glwe ciphertext and id for query, transform the current masks to blind rotation masks.
     pub fn transform_mask(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> GlweCiphertextListOwned<u8> {
-        let masks_for_innerprod = self.transform_mask_to_body(id, glwe_ct)[0];
+        let masks_for_innerprod = self.transform_mask_to_body(id, glwe_ct);
+
+        let carry = masks_for_innerprod & (1 << (63 - self.precision));
+        let masks_for_innerprod = u64::wrapping_add(masks_for_innerprod >> (64 - self.precision), carry >> (63 - self.precision));
 
         // lookup table where `mased_innerprod + [theta,N/2)` are assigned with 1, and others with 0
         // Note that when modulo 2, -1 is regarded as one so the rotation is cyclic.
@@ -292,7 +295,9 @@ impl Client {
     ///     1. (monomial) ct acts on [1,1,...,1] would yield [1,1,...,1]
     ///     2. (faithful) ct acts on [0,1,...,n-1] would yield $b$ at the constant part
     /// Since $b$ is rounded, or decomposed, we need several Glwe Ciphertexts for wrapping these values
-    pub fn transform_mask_to_glwe(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> Vec<GlweCiphertextOwned<u64>> {
+    pub fn transform_mask_to_glwe(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>)
+        -> Vec<(GlweCiphertextOwned<u64>, GlweCiphertextOwned<u64>)>
+    {
         let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
             self.noise_seeder.seed(),
             self.noise_seeder.as_mut(),
@@ -300,33 +305,54 @@ impl Client {
 
         let masks_for_innerprod = self.transform_mask_to_body(id, glwe_ct);
         let br_polydim = 1usize << self.precision;
-        masks_for_innerprod
-            .into_iter()
-            .map(|mask_decomposed| {
-                let mut ct = GlweCiphertext::new(
-                    0u64,
-                    self.ip_param.glwe_size,
-                    self.ip_param.polynomial_size,
-                    CiphertextModulus::new_native()
-                );
 
-                let mut cleartext = vec![0; self.ip_param.polynomial_size.0];
+        let carry = masks_for_innerprod & (1 << (63 - self.precision));
+        let masks_for_innerprod_act = u64::wrapping_add(masks_for_innerprod >> (64 - self.precision), carry >> (63 - self.precision));
 
-                // monomial
-                cleartext[(br_polydim - mask_decomposed as usize) % br_polydim] = self.ip_param.delta;
+        // construct the selector
+        let mut ct_act = GlweCiphertext::new(
+            0u64,
+            self.ip_param.glwe_size,
+            self.ip_param.polynomial_size,
+            CiphertextModulus::new_native()
+        );
+        let mut ct_act_inv = GlweCiphertext::new(
+            0u64,
+            self.ip_param.glwe_size,
+            self.ip_param.polynomial_size,
+            CiphertextModulus::new_native()
+        );
 
-                let plaintext = PlaintextList::from_container(cleartext);
-                encrypt_glwe_ciphertext(
-                    &self.glwe_sk_ip,
-                    &mut ct,
-                    &plaintext,
-                    self.distribution_ip,
-                    &mut encryption_generator
-                );
 
-                ct
-            })
-            .collect()
+        let mut cleartext = vec![0; self.ip_param.polynomial_size.0];
+
+        // monomial
+        cleartext[(br_polydim - masks_for_innerprod_act as usize) % br_polydim] = self.ip_param.delta;
+
+        let plaintext = PlaintextList::from_container(cleartext.clone());
+        encrypt_glwe_ciphertext(
+            &self.glwe_sk_ip,
+            &mut ct_act,
+            &plaintext,
+            self.distribution_ip,
+            &mut encryption_generator
+        );
+
+        // proof for monomial
+        if masks_for_innerprod_act as usize != br_polydim {
+            cleartext[(br_polydim - masks_for_innerprod_act as usize) % br_polydim] = 0;
+            cleartext[(br_polydim - masks_for_innerprod_act as usize) % br_polydim] =
+                u64::wrapping_sub(0, self.ip_param.delta);
+        }
+        encrypt_glwe_ciphertext(
+            &self.glwe_sk_ip,
+            &mut ct_act_inv,
+            &plaintext,
+            self.distribution_ip,
+            &mut encryption_generator
+        );
+
+        vec![(ct_act, ct_act_inv)]
     }
 
 
@@ -339,8 +365,7 @@ impl Client {
 
 
     /// Transform the template mask to decrypted body
-    /// The result is furthur decomposed with radix of (1 << precision)
-    fn transform_mask_to_body(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> Vec<u64> {
+    fn transform_mask_to_body(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> u64 {
         let ciphertext_modulus = CiphertextModulus::new_native();
         let mut glwe_ct_list = GlweCiphertextList::new(
             0,
@@ -395,20 +420,21 @@ impl Client {
 
         #[cfg(feature = "debug")]
         println!("masks for inner prod: {}", masks_for_innerprod);
-        let mut decomposed_masked_ips = vec![];
-        let mut now_prec = self.precision;
-        let prec_mask = ((1 << self.precision) - 1) as u64;
-        while now_prec <= self.mal_precision {
-            decomposed_masked_ips.push((masks_for_innerprod >> (64 - now_prec)) & prec_mask);
-            now_prec += self.precision;
-        }
+        // let mut decomposed_masked_ips = vec![];
+        // let mut now_prec = self.precision;
+        // let prec_mask = ((1 << self.precision) - 1) as u64;
+        // while now_prec <= self.mal_precision {
+        //     decomposed_masked_ips.push((masks_for_innerprod >> (64 - now_prec)) & prec_mask);
+        //     now_prec += self.precision;
+        // }
 
         // let carry = masks_for_innerprod & (1 << (63 - self.precision));
         // let masks_for_innerprod = u64::wrapping_add(masks_for_innerprod >> (64 - self.precision), carry >> (63 - self.precision));
-        #[cfg(feature = "debug")]
-        println!("truncated masked innerprod: {:?}", decomposed_masked_ips);
+        // #[cfg(feature = "debug")]
+        // println!("truncated masked innerprod: {:?}", decomposed_masked_ips);
 
-        decomposed_masked_ips
+        // decomposed_masked_ips
+        masks_for_innerprod
     }
 
     fn encode(&self, features: &[f32], scale: f32) -> Vec<u64> {

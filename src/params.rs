@@ -34,12 +34,13 @@ pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u8> = GlweParameter {
     decomposition_level_count: DecompositionLevelCount(1),  // unused
 };
 
-pub const DEFAULT_MALICIOUS_ROTATION_PARAMETER: GlweParameter<u32> = GlweParameter {
-    glwe_size: GlweSize(4),
-    polynomial_size: PolynomialSize(256),
+/// RLWE parameter
+pub const DEFAULT_MALICIOUS_PARAMETER: GlweParameter<u64> = GlweParameter {
+    glwe_size: GlweSize(2),
+    polynomial_size: PolynomialSize(2048),
     std_dev: 0.00000000000000029403601535432533,
-    plaintext_modulus: 2,
-    delta: 1 << 23,
+    plaintext_modulus: 1 << 19,
+    delta: 1 << 45,
     decomposition_base_log: DecompositionBaseLog(16),
     decomposition_level_count: DecompositionLevelCount(1),
 };
