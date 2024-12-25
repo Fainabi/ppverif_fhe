@@ -52,13 +52,6 @@ impl Client {
             &mut secret_generator,
         );
 
-        // let glwe_sk_mal = GlweSecretKey::generate_new_binary(
-        //     GlweDimension(mal_param.glwe_size.0 - 1),
-        //     mal_param.polynomial_size,
-        //     &mut secret_generator,
-        // );
-
-
         let mut rng = thread_rng();
 
         Self {
@@ -502,8 +495,323 @@ impl Client {
     }
 }
 
+/*
+    =====================================================
+                    Malicious Client 
+    =====================================================
+*/
 
-
+/// Malicious Client
+/// The malicious client 
 pub struct MalClient {
+    mal_param: GlweParameter<u128>,
 
+    // key for encrypting templates and performing inner product
+    rlwe_sk: GlweSecretKeyOwned<u128>,
+    glwe_sk: GlweSecretKeyOwned<u128>,  // rearranged from rlwe_sk
+
+    // global seed for masking templates
+    id_seeder: IdSeeder,
+
+    // for generate noise
+    noise_seeder: Box<dyn Seeder>,
+
+    // noise distribution
+    distribution: Gaussian<f64>,
+
+    threshold: usize,  // always assume threshold to be non-negative in the current implementations
+    precision: usize,
+}
+
+impl MalClient {
+    pub fn new(mal_param: GlweParameter<u128>) -> Self {
+        let mut seeder = new_seeder();
+        
+        let mut secret_generator =
+            SecretRandomGenerator::<ActivatedRandomGenerator>::new(seeder.seed());
+
+        let rlwe_sk = GlweSecretKey::generate_new_binary(
+            GlweDimension(1),
+            PolynomialSize(mal_param.polynomial_size.0 * (mal_param.glwe_size.0 - 1)),
+            &mut secret_generator,
+        );
+
+        let sk_container = rlwe_sk.clone().into_container();
+        let mut glwe_sk = vec![0; sk_container.len()];
+        let N = mal_param.polynomial_size.0;
+        let n = mal_param.glwe_size.0-1;
+        for ni in 0..n {
+            for Ni in 0..N {
+                glwe_sk[ni * N + Ni] = sk_container[ni + Ni * n];
+            }
+        }
+
+        let glwe_sk = GlweSecretKey::from_container(glwe_sk, mal_param.polynomial_size);
+
+        let mut rng = thread_rng();
+
+        Self {
+            mal_param,
+            rlwe_sk,
+            glwe_sk,
+            distribution: Gaussian::from_dispersion_parameter(StandardDev(mal_param.std_dev), 0.0),
+            id_seeder: IdSeeder::new(((rng.next_u64() as u128) << 64) | (rng.next_u64() as u128)),
+            noise_seeder: seeder,
+            threshold: 0,
+            precision: 8,  // [-127, 128]
+        }
+    }
+
+    pub fn new_rlwe_public_key(&mut self) -> GlweCiphertextOwned<u128> {
+        let plaintext_list = PlaintextList::from_container(vec![0; self.mal_param.polynomial_size.0 * (self.mal_param.glwe_size.0 - 1)]);
+        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            self.noise_seeder.seed(),
+            self.noise_seeder.as_mut(),
+        );
+
+        let ciphertext_modulus = CiphertextModulus::new_native();
+        let mut ct = GlweCiphertext::new(
+            0,
+            GlweSize(2),
+            PolynomialSize(self.mal_param.polynomial_size.0 * (self.mal_param.glwe_size.0 - 1)),
+            ciphertext_modulus
+        );
+
+        encrypt_glwe_ciphertext(
+            &self.rlwe_sk,
+            &mut ct,
+            &plaintext_list,
+            self.distribution,
+            &mut encryption_generator
+        );
+
+        ct
+    }
+
+    pub fn encrypt_glwe(&mut self, features: &[f32], scale: f32) -> GlweCiphertextOwned<u128> {
+        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            self.noise_seeder.seed(),
+            self.noise_seeder.as_mut(),
+        );
+
+        let ciphertext_modulus = CiphertextModulus::new_native();
+        let mut glwe = GlweCiphertext::new(
+            0u128,
+            self.mal_param.glwe_size,
+            self.mal_param.polynomial_size,
+            ciphertext_modulus,
+        );
+
+        let msgs = self.encode(features, scale);
+        let plaintext_list = PlaintextList::from_container(msgs);
+
+        encrypt_glwe_ciphertext(
+            &self.glwe_sk,
+            &mut glwe,
+            &plaintext_list,
+            self.distribution,
+            &mut encryption_generator,
+        );
+
+        glwe
+    }
+
+    pub fn encrypt_rlwe(&mut self, features: &[f32], scale: f32) -> GlweCiphertextOwned<u128> {
+        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            self.noise_seeder.seed(),
+            self.noise_seeder.as_mut(),
+        );
+
+        let ciphertext_modulus = CiphertextModulus::new_native();
+        let mut rlwe = GlweCiphertext::new(
+            0u128,
+            GlweSize(2),
+            PolynomialSize(self.mal_param.polynomial_size.0 * (self.mal_param.glwe_size.0 - 1)),
+            ciphertext_modulus,
+        );
+
+        let msgs = self.encode(features, scale);
+        let plaintext_list = PlaintextList::from_container(msgs);
+
+        encrypt_glwe_ciphertext(
+            &self.rlwe_sk,
+            &mut rlwe,
+            &plaintext_list,
+            self.distribution,
+            &mut encryption_generator,
+        );
+
+        rlwe
+    }
+
+    pub fn decrypt_glwe(&self, ct: &GlweCiphertextOwned<u128>) -> Vec<u128> {
+        let mut plaintext_list = PlaintextList::from_container(vec![0u128; self.mal_param.polynomial_size.0]);
+        decrypt_glwe_ciphertext(&self.glwe_sk, ct, &mut plaintext_list);
+
+        plaintext_list.as_mut().iter_mut().for_each(|vi| {
+            // let decoded = *vi as f128 / (self.mal_param.delta as f128);
+            // *vi = decoded.round() as u128;
+            *vi = self.div_round(*vi & self.mal_param.ciphertext_mask, self.mal_param.delta) % self.mal_param.plaintext_modulus;
+        });
+
+        plaintext_list.into_container()
+    }
+
+    pub fn decrypt_rlwe(&self, ct: &GlweCiphertextOwned<u128>) -> Vec<u128> {
+        let mut plaintext_list = PlaintextList::from_container(vec![0u128; self.mal_param.polynomial_size.0 * (self.mal_param.glwe_size.0 - 1)]);
+        decrypt_glwe_ciphertext(&self.rlwe_sk, ct, &mut plaintext_list);
+
+        plaintext_list.as_mut().iter_mut().for_each(|vi| {
+            *vi = self.div_round(*vi & self.mal_param.ciphertext_mask, self.mal_param.delta) % self.mal_param.plaintext_modulus;
+        });
+
+        plaintext_list.into_container()
+    }
+
+    
+    /// Encrypt a new template with a given ID. The ciphertexts are GGSW ciphertexts but only body needs transferring.
+    /// The layout of GGSW ciphertexts is 
+    ///     Glev { poly * s_0 }
+    ///     Glev { poly * s_1 }
+    ///     ...
+    ///     Glev { poly }
+    pub fn encrypt_new_template(&mut self, id: u128, features: &[f32], scale: f32) -> GlweCiphertextListOwned<u128> {
+        let ciphertext_modulus = CiphertextModulus::new_native();
+
+        // cleartext for GGSW ciphertexts
+        let cleartext: Vec<_> = features
+            .iter()
+            .map(|&v| {
+                let v = (v * scale).round() as i64;
+                if v >= 0 {
+                    v as u128
+                } else {
+                    (self.mal_param.plaintext_modulus as i64 + v) as u128
+                }
+            })
+            .collect();
+        let clearpoly = Polynomial::from_container(cleartext);
+
+        let mut generator = RandomGenerator::<ActivatedRandomGenerator>::new(
+            self.noise_seeder.seed(),
+        );
+
+        let mut glwe_ct_list = GlweCiphertextList::new(
+            0, 
+            self.mal_param.glwe_size, 
+            self.mal_param.polynomial_size, 
+            GlweCiphertextCount(self.mal_param.decomposition_level_count.0 * self.mal_param.glwe_size.0), 
+            ciphertext_modulus
+        );
+
+        // id as a seed for generating masks of GGSW ciphertexts
+        self.fill_with_template_masks(id, &mut glwe_ct_list);
+
+        // computes the body of GGSW ciphertexts
+        glwe_ct_list
+            .chunks_mut(self.mal_param.decomposition_level_count.0)
+            .enumerate()
+            .for_each(|(glev_idx, mut chunk)| {
+                // poly * s
+                let mut clearpoly_s = clearpoly.clone();
+                if glev_idx + 1 < self.mal_param.glwe_size.0 {
+                    polynomial_wrapping_mul(
+                        &mut clearpoly_s, 
+                        &clearpoly, 
+                        &self.glwe_sk.as_polynomial_list().get(glev_idx)
+                    );
+                }
+
+                // each chunk is a Glev ciphertext
+                chunk.iter_mut()
+                    .enumerate()
+                    .for_each(|(beta_idx, mut glwe_ct)| {
+                        // poly * beta_i * s
+                        let idx = self.mal_param.decomposition_level_count.0 - beta_idx;
+                        let mut clearpoly_beta_s = clearpoly_s.clone();
+                        clearpoly_beta_s.iter_mut()
+                            .for_each(|v| {
+                                // encode to the MSB
+                                *v <<= self.mal_param.decomposition_base_log.0 * idx;
+
+                                // negate if Glev for masks
+                                if glev_idx + 1 < self.mal_param.glwe_size.0 {
+                                    *v = u128::wrapping_add(!(*v), 1);
+                                }
+                            });
+
+                        self.encrypt_with_existed_masks(&mut glwe_ct, clearpoly_beta_s, &mut generator);
+                    });
+            });
+
+        glwe_ct_list
+    }
+
+
+    
+    fn encode(&self, features: &[f32], scale: f32) -> Vec<u128> {
+        features
+            .iter()
+            .map(|&v| {
+                let v = (v * scale).round() as i128;
+                if v >= 0 {
+                    u128::wrapping_mul(v as u128, self.mal_param.delta)
+                } else {
+                    let t_minus_v = self.mal_param.plaintext_modulus as i128 + v;
+                    u128::wrapping_mul(t_minus_v as u128, self.mal_param.delta)
+                }
+            })
+            .collect()
+    }
+
+    fn div_round(&self, v: u128, delta: u128) -> u128 {
+        let q = v / delta;
+        let r = v % delta;
+        if r >= delta / 2 {
+            q + 1
+        } else {
+            q
+        }
+    }
+
+    fn fill_with_template_masks(&mut self, id: u128, glwe_ct_list: &mut GlweCiphertextListOwned<u128>) {
+        let ciphertext_modulus = CiphertextModulus::new_native();
+        let mut generator = RandomGenerator::<ActivatedRandomGenerator>::new(
+            self.id_seeder.seed(id),
+        );
+        
+        glwe_ct_list
+            .iter_mut()
+            .for_each(|mut ct| {
+                generator.fill_slice_with_random_uniform_custom_mod(ct.get_mut_mask().as_mut(), ciphertext_modulus);
+            });
+    }
+
+    fn encrypt_with_existed_masks<G>(
+        &mut self, 
+        glwe_ct: &mut GlweCiphertextMutView<u128>, 
+        pt_poly: PolynomialOwned<u128>, 
+        generator: &mut RandomGenerator<G>
+    ) where G : ByteRandomGenerator {
+        let ciphertext_modulus = CiphertextModulus::new_native();
+        let (mask, mut body) = glwe_ct.get_mut_mask_and_body();
+
+        generator.fill_slice_with_random_from_distribution_custom_mod(
+            body.as_mut(),
+            self.distribution,
+            ciphertext_modulus,
+        );
+
+        polynomial_wrapping_add_assign(
+            &mut body.as_mut_polynomial(),
+            &pt_poly,
+        );
+
+        // (a, <a,s> + m)
+        polynomial_wrapping_add_multisum_assign(
+            &mut body.as_mut_polynomial(),
+            &mask.as_polynomial_list(),
+            &self.glwe_sk.as_polynomial_list(),
+        );
+    }
 }

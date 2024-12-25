@@ -17,3 +17,7 @@ debug = []
 [[example]]
 name = "demo"
 path = "examples/demo.rs"
+
+[[example]]
+name = "mal_demo"
+path = "examples/mal_demo.rs"

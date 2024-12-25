@@ -11,6 +11,7 @@ pub struct GlweParameter<Scalar> {
     pub delta: Scalar,
     pub decomposition_base_log: DecompositionBaseLog,
     pub decomposition_level_count: DecompositionLevelCount,
+    pub ciphertext_mask: Scalar
 }
 
 pub const DEFAULT_INNER_PRODUCT_PARAMETER: GlweParameter<u64> = GlweParameter {
@@ -22,28 +23,31 @@ pub const DEFAULT_INNER_PRODUCT_PARAMETER: GlweParameter<u64> = GlweParameter {
     delta: 1 << 45,
     decomposition_base_log: DecompositionBaseLog(40),  // = 64 - 24
     decomposition_level_count: DecompositionLevelCount(1),
+    ciphertext_mask: 0xFFFFFFFF_FFFFFFFF,
 };
 
 pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u16> = GlweParameter {
     glwe_size: GlweSize(4),
     polynomial_size: PolynomialSize(256),
-    // std_dev: 0.00000000000000029403601535432533,  // chi = 3.2
-    std_dev: 0.0,
+    std_dev: 0.00000000000000029403601535432533,  // chi = 3.2
     plaintext_modulus: 2,
     delta: 1 << 15,
     decomposition_base_log: DecompositionBaseLog(16),  // unused
     decomposition_level_count: DecompositionLevelCount(1),  // unused
+    ciphertext_mask: 0xFFFF,
 };
 
 /// RLWE parameter, modulo (2 ** 96)
 pub const DEFAULT_MALICIOUS_PARAMETER: GlweParameter<u128> = GlweParameter {
-    glwe_size: GlweSize(2),
-    polynomial_size: PolynomialSize(4096),
-    std_dev: 0.00000000000000029403601535432533,
+    glwe_size: GlweSize(9),
+    polynomial_size: PolynomialSize(512),  // 4096
+    // std_dev: 0.00000000000000029403601535432533,
+    std_dev: 0.0,
     plaintext_modulus: 1 << 19,
-    delta: 1 << 45,
-    decomposition_base_log: DecompositionBaseLog(16),
-    decomposition_level_count: DecompositionLevelCount(1),
+    delta: 1 << (45 + 32),
+    decomposition_base_log: DecompositionBaseLog(32),
+    decomposition_level_count: DecompositionLevelCount(2),
+    ciphertext_mask: 0xFFFFFFFF_FFFFFFFF_FFFFFFFF,  // 2^96
 };
 
 pub type FourierGgswCiphertextOwned = FourierGgswCiphertext<ABox<[c64]>>;
