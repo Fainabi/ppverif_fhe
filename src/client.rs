@@ -9,17 +9,13 @@ use crate::seeder::IdSeeder;
 pub struct Client {
     // parameters
     ip_param: GlweParameter<u64>,
-    br_param: GlweParameter<u8>,
-    // mal_param: GlweParameter<u32>,
+    br_param: GlweParameter<u16>,
 
     // key for encrypting templates and performing inner product
     glwe_sk_ip: GlweSecretKeyOwned<u64>,
     
     // key for blind rotation
-    glwe_sk_br: GlweSecretKeyOwned<u8>,
-
-    // key for malicious blind rotation
-    glwe_sk_mal: GlweSecretKeyOwned<u32>,
+    glwe_sk_br: GlweSecretKeyOwned<u16>,
 
     // global seed for masking templates
     id_seeder: IdSeeder,
@@ -33,13 +29,12 @@ pub struct Client {
 
     threshold: usize,  // always assume threshold to be non-negative in the current implementations
     precision: usize,
-    mal_precision: usize,
 }
 
 impl Client {
     /// Instantiate a new client with a default `thread_rng`.
     /// `ip_param` is for inner product, and `br_param` is for blind rotation
-    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u8>, mal_param: GlweParameter<u32>) -> Self {
+    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u16>) -> Self {
         let mut seeder = new_seeder();
         
         let mut secret_generator =
@@ -57,11 +52,11 @@ impl Client {
             &mut secret_generator,
         );
 
-        let glwe_sk_mal = GlweSecretKey::generate_new_binary(
-            GlweDimension(mal_param.glwe_size.0 - 1),
-            mal_param.polynomial_size,
-            &mut secret_generator,
-        );
+        // let glwe_sk_mal = GlweSecretKey::generate_new_binary(
+        //     GlweDimension(mal_param.glwe_size.0 - 1),
+        //     mal_param.polynomial_size,
+        //     &mut secret_generator,
+        // );
 
 
         let mut rng = thread_rng();
@@ -69,61 +64,58 @@ impl Client {
         Self {
             ip_param,
             br_param,
-            // mal_param,
             glwe_sk_ip,
             glwe_sk_br,
-            glwe_sk_mal,
             distribution_ip: Gaussian::from_dispersion_parameter(StandardDev(ip_param.std_dev), 0.0),
             distribution_br: Gaussian::from_dispersion_parameter(StandardDev(br_param.std_dev), 0.0),
             id_seeder: IdSeeder::new(((rng.next_u64() as u128) << 64) | (rng.next_u64() as u128)),
             noise_seeder: seeder,
             threshold: 0,
-            precision: 8,  // [-128, 127]
-            mal_precision: 16,
+            precision: 8,  // [-127, 128]
         }
     }
 
-    pub fn new_lwe_public_key(&mut self) -> LwePublicKeyOwned<u8> {
-        let lwe_size = LweSize((self.br_param.glwe_size.0 - 1) * self.br_param.polynomial_size.0 + 1);
-        let ciphertext_modulus = CiphertextModulus::new_native();
-        let mut pk = LwePublicKey::new(0u8, lwe_size, LwePublicKeyZeroEncryptionCount(1), ciphertext_modulus);
-        let mut generator =  EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
-            self.noise_seeder.seed(),
-            self.noise_seeder.as_mut(),
-        );
+    // pub fn new_lwe_public_key(&mut self) -> LwePublicKeyOwned<u8> {
+    //     let lwe_size = LweSize((self.br_param.glwe_size.0 - 1) * self.br_param.polynomial_size.0 + 1);
+    //     let ciphertext_modulus = CiphertextModulus::new_native();
+    //     let mut pk = LwePublicKey::new(0u8, lwe_size, LwePublicKeyZeroEncryptionCount(1), ciphertext_modulus);
+    //     let mut generator =  EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+    //         self.noise_seeder.seed(),
+    //         self.noise_seeder.as_mut(),
+    //     );
 
-        generate_lwe_public_key(
-            &self.glwe_sk_br.as_lwe_secret_key(), 
-            &mut pk, 
-            self.distribution_br, 
-            &mut generator
-        );
-        pk
-    }
+    //     generate_lwe_public_key(
+    //         &self.glwe_sk_br.as_lwe_secret_key(), 
+    //         &mut pk, 
+    //         self.distribution_br, 
+    //         &mut generator
+    //     );
+    //     pk
+    // }
 
-    /// generate a list of glwe ciphertext as glwe public keys for malicious client
-    pub fn new_glwe_public_keys(&mut self) -> Vec<GlweCiphertextOwned<u64>> {
-        let plaintext_list = PlaintextList::from_container(vec![0; self.ip_param.polynomial_size.0]);
+    /// generate a list of glwe ciphertext as glwe public keys for blind rotation
+    pub fn new_glwe_public_keys_br(&mut self) -> Vec<GlweCiphertextOwned<u16>> {
+        let plaintext_list = PlaintextList::from_container(vec![0; self.br_param.polynomial_size.0]);
         let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
             self.noise_seeder.seed(),
             self.noise_seeder.as_mut(),
         );
 
-        (0..self.ip_param.glwe_size.0-1)
+        (0..self.br_param.glwe_size.0-1)
             .map(|_| {
                 let ciphertext_modulus = CiphertextModulus::new_native();
                 let mut ct = GlweCiphertext::new(
                     0,
-                    self.ip_param.glwe_size,
-                    self.ip_param.polynomial_size,
+                    self.br_param.glwe_size,
+                    self.br_param.polynomial_size,
                     ciphertext_modulus
                 );
 
                 encrypt_glwe_ciphertext(
-                    &self.glwe_sk_ip,
+                    &self.glwe_sk_br,
                     &mut ct,
                     &plaintext_list,
-                    self.distribution_ip,
+                    self.distribution_br,
                     &mut encryption_generator
                 );
 
@@ -220,6 +212,15 @@ impl Client {
             .collect()
     }
 
+    /// for malicious client
+    /// The client encrypt the template and the reversed template together, for checking that the template is normalized
+    /// Return:
+    ///     - Encrypted template
+    ///     - norm of the template
+    // pub fn encode_template_rlwe(&mut self, plaintext: &[u64]) -> (GlweCiphertextOwned<u64>, u32) {
+    //     // let 
+    // }
+
     /// Encrypt a new Glwe Ciphertext for inner product
     pub fn encrypt_glwe(&mut self, features: &[f32], scale: f32) -> GlweCiphertextOwned<u64> {
         let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
@@ -250,7 +251,7 @@ impl Client {
     }
 
     /// Given a Glwe ciphertext and id for query, transform the current masks to blind rotation masks.
-    pub fn transform_mask(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> GlweCiphertextListOwned<u8> {
+    pub fn transform_mask(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> GlweCiphertextListOwned<u16> {
         let masks_for_innerprod = self.transform_mask_to_body(id, glwe_ct);
 
         let carry = masks_for_innerprod & (1 << (63 - self.precision));
@@ -259,7 +260,7 @@ impl Client {
         // lookup table where `mased_innerprod + [theta,N/2)` are assigned with 1, and others with 0
         // Note that when modulo 2, -1 is regarded as one so the rotation is cyclic.
         let br_polydim = 1 << self.precision;
-        let mut cleartext = vec![0u8; br_polydim];
+        let mut cleartext = vec![0u16; br_polydim];
         for idx in self.threshold..(br_polydim/2) {
             cleartext[(idx + br_polydim - masks_for_innerprod as usize) % br_polydim] = self.br_param.delta;
         }
@@ -356,11 +357,11 @@ impl Client {
     }
 
 
-    pub fn decrypt_lwe(&self, lwe_ct: LweCiphertextOwned<u8>) -> u8 {
+    pub fn decrypt_lwe(&self, lwe_ct: LweCiphertextOwned<u16>) -> u16 {
         let pt = decrypt_lwe_ciphertext(&self.glwe_sk_br.as_lwe_secret_key(), &lwe_ct);
 
         // either 0 or 1
-        (pt.0 as f32 / self.br_param.delta as f32).round() as u8
+        (pt.0 as f32 / self.br_param.delta as f32).round() as u16
     }
 
 
@@ -501,3 +502,8 @@ impl Client {
     }
 }
 
+
+
+pub struct MalClient {
+
+}

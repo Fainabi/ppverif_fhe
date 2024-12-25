@@ -14,7 +14,7 @@ pub struct GlweParameter<Scalar> {
 }
 
 pub const DEFAULT_INNER_PRODUCT_PARAMETER: GlweParameter<u64> = GlweParameter {
-    glwe_size: GlweSize(5),
+    glwe_size: GlweSize(6),
     polynomial_size: PolynomialSize(512),
     std_dev: 1.7347234759768072e-13,
     // std_dev: 0.0,
@@ -24,20 +24,21 @@ pub const DEFAULT_INNER_PRODUCT_PARAMETER: GlweParameter<u64> = GlweParameter {
     decomposition_level_count: DecompositionLevelCount(1),
 };
 
-pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u8> = GlweParameter {
+pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u16> = GlweParameter {
     glwe_size: GlweSize(4),
-    polynomial_size: PolynomialSize(128),
-    std_dev: 0.00000000000000029403601535432533,
+    polynomial_size: PolynomialSize(256),
+    // std_dev: 0.00000000000000029403601535432533,  // chi = 3.2
+    std_dev: 0.0,
     plaintext_modulus: 2,
-    delta: 1 << 7,
-    decomposition_base_log: DecompositionBaseLog(8),  // unused
+    delta: 1 << 15,
+    decomposition_base_log: DecompositionBaseLog(16),  // unused
     decomposition_level_count: DecompositionLevelCount(1),  // unused
 };
 
-/// RLWE parameter
-pub const DEFAULT_MALICIOUS_PARAMETER: GlweParameter<u64> = GlweParameter {
+/// RLWE parameter, modulo (2 ** 96)
+pub const DEFAULT_MALICIOUS_PARAMETER: GlweParameter<u128> = GlweParameter {
     glwe_size: GlweSize(2),
-    polynomial_size: PolynomialSize(2048),
+    polynomial_size: PolynomialSize(4096),
     std_dev: 0.00000000000000029403601535432533,
     plaintext_modulus: 1 << 19,
     delta: 1 << 45,
