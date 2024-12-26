@@ -7,4 +7,4 @@ mod rlwe;
 pub use client::{Client, MalClient};
 pub use params::{DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, DEFAULT_MALICIOUS_PARAMETER};
 pub use server::{Server, MalServer};
-pub use rlwe::extract_glwe_sample_from_rlwe_ciphertext;
+pub use rlwe::{extract_glwe_sample_from_rlwe_ciphertext, rlwe_multiplication_u96};

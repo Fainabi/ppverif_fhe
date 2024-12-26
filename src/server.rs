@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use polynomial_algorithms::{polynomial_wrapping_add_mul_assign, polynomial_wrapping_mul};
+use polynomial_algorithms::{polynomial_wrapping_add_assign, polynomial_wrapping_add_mul_assign, polynomial_wrapping_mul};
 use tfhe::core_crypto::prelude::*;
 use rand::{thread_rng, RngCore};
 use crate::{params::*, rlwe::*};
@@ -157,7 +157,8 @@ pub struct MalServer {
     database: BTreeMap<u128, GlweCiphertextListOwned<u128>>,
 
     // for masking the sample extraction to product inner product
-    glwe_pk: GlweCiphertextOwned<u128>,
+    rlwe_pk: GlweCiphertextOwned<u128>,
+    rlwe_rlk: Vec<GlweCiphertextOwned<u128>>,
 
     seeder: Box<dyn Seeder>,
 
@@ -165,11 +166,12 @@ pub struct MalServer {
 }
 
 impl MalServer {
-    pub fn new(mal_param: GlweParameter<u128>, glwe_pk: GlweCiphertextOwned<u128>) -> Self {
+    pub fn new(mal_param: GlweParameter<u128>, rlwe_pk: GlweCiphertextOwned<u128>, rlwe_rlk: Vec<GlweCiphertextOwned<u128>>) -> Self {
         Self {
             mal_param,
             database: BTreeMap::new(),
-            glwe_pk,
+            rlwe_pk,
+            rlwe_rlk,
             seeder: new_seeder(),
             precision: 8,
         }
@@ -197,7 +199,6 @@ impl MalServer {
                     CiphertextModulus::new_native()
                 );
                 ggsw.chunks(self.mal_param.decomposition_level_count.0)
-                    // .enumerate()
                     .zip(glwe.as_polynomial_list().iter())
                     .for_each(|(chunk, poly)| {
                         chunk.iter()
@@ -229,6 +230,52 @@ impl MalServer {
                 Some(glwe_out)
             }
         }
+    }
+
+    // pub fn rlwe_multiplication(&self, lhs: GlweCiphertextOwned<u128>, rhs: GlweCiphertextOwned<u128>) -> GlweCiphertextOwned<u128> {
+    //     let rlwe_dim = self.mal_param.polynomial_size.0 * (self.mal_param.glwe_size.0 - 1);
+    //     let mut ct_out = GlweCiphertext::new(0, GlweSize(3), PolynomialSize(rlwe_dim), CiphertextModulus::new_native());
+        
+    //     let lhs_poly = lhs.as_polynomial_list();
+    //     let rhs_poly = rhs.as_polynomial_list();
+    //     let mut ct_out_poly = ct_out.as_mut_polynomial_list();
+    //     polynomial_wrapping_add_mul_assign(&mut ct_out_poly.get_mut(0), &lhs_poly.get(0), &rhs_poly.get(0));
+    //     polynomial_wrapping_add_mul_assign(&mut ct_out_poly.get_mut(1), &lhs_poly.get(0), &rhs_poly.get(1));
+    //     polynomial_wrapping_add_mul_assign(&mut ct_out_poly.get_mut(1), &lhs_poly.get(1), &rhs_poly.get(0));
+    //     polynomial_wrapping_add_mul_assign(&mut ct_out_poly.get_mut(2), &lhs_poly.get(1), &rhs_poly.get(1));
+
+    //     ct_out
+    // }
+
+    pub fn relinearize(&self, ct: &GlweCiphertextOwned<u128>) -> GlweCiphertextOwned<u128> {
+        let mut out = GlweCiphertext::new(0, GlweSize(2), ct.polynomial_size(), CiphertextModulus::new_native());
+        let ct_poly = ct.as_polynomial_list();
+        let mut out_poly = out.as_mut_polynomial_list();
+
+        polynomial_wrapping_add_assign(&mut out_poly.get_mut(0), &ct_poly.get(1));
+        polynomial_wrapping_add_assign(&mut out_poly.get_mut(1), &ct_poly.get(2));
+
+        (0..self.mal_param.decomposition_level_count.0)
+            .zip(self.rlwe_rlk.iter())
+            .for_each(|(beta_idx, rlk)| {
+                let idx = self.mal_param.decomposition_level_count.0 - beta_idx;
+                let decomposed = ct_poly
+                    .get(0)
+                    .into_container()
+                    .iter()
+                    .map(|&vi| {
+                        let v_mod = vi & self.mal_param.ciphertext_mask;
+                        (v_mod >> (idx * self.mal_param.decomposition_base_log.0)) & ((1 << self.mal_param.decomposition_base_log.0) - 1)
+                    })
+                    .collect::<Vec<_>>();
+
+                let dcp_poly = Polynomial::from_container(decomposed);
+                out_poly.iter_mut().zip(rlk.as_polynomial_list().iter()).for_each(|(mut out_i, rlk_i)| {
+                    polynomial_wrapping_add_mul_assign(&mut out_i, &rlk_i, &dcp_poly);
+                });
+            });
+
+        out
     }
 
     // `query_ct` is for calculating the inner product with masks $v + r$

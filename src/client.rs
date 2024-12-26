@@ -588,6 +588,44 @@ impl MalClient {
         ct
     }
 
+    pub fn new_rlwe_relinearizaion_keys(&mut self) -> Vec<GlweCiphertextOwned<u128>> {
+        let mut s_squared = Polynomial::from_container(vec![0; self.rlwe_sk.polynomial_size().0]);
+        let s_poly = Polynomial::from_container(self.rlwe_sk.as_polynomial_list().into_container());
+        polynomial_wrapping_add_mul_assign(&mut s_squared, &s_poly, &s_poly);
+
+        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            self.noise_seeder.seed(),
+            self.noise_seeder.as_mut(),
+        );
+
+        (0..self.mal_param.decomposition_level_count.0)
+            .map(|beta_idx| {
+                let idx = self.mal_param.decomposition_level_count.0 - beta_idx;
+                let s_squared_i = s_squared
+                    .iter()
+                    .map(|&vi| vi * (1 << (idx * self.mal_param.decomposition_base_log.0)))
+                    .collect::<Vec<_>>();
+                let s_squared_i_poly = Polynomial::from_container(s_squared_i);
+
+                let mut ct = GlweCiphertext::from_container(
+                    vec![0; s_squared_i_poly.polynomial_size().0 * 2], 
+                    s_squared_i_poly.polynomial_size(), 
+                    CiphertextModulus::new_native()
+                );
+                polynomial_wrapping_add_assign(&mut ct.get_mut_body().as_mut_polynomial(), &s_squared_i_poly);
+
+                encrypt_glwe_ciphertext_assign(
+                    &self.rlwe_sk, 
+                    &mut ct, 
+                    self.distribution, 
+                    &mut encryption_generator
+                );
+
+                ct
+            })
+            .collect()
+    }
+
     pub fn encrypt_glwe(&mut self, features: &[f32], scale: f32) -> GlweCiphertextOwned<u128> {
         let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
             self.noise_seeder.seed(),
@@ -659,7 +697,29 @@ impl MalClient {
 
     pub fn decrypt_rlwe(&self, ct: &GlweCiphertextOwned<u128>) -> Vec<u128> {
         let mut plaintext_list = PlaintextList::from_container(vec![0u128; self.mal_param.polynomial_size.0 * (self.mal_param.glwe_size.0 - 1)]);
-        decrypt_glwe_ciphertext(&self.rlwe_sk, ct, &mut plaintext_list);
+        // decrypt_glwe_ciphertext(&self.rlwe_sk, ct, &mut plaintext_list);
+        polynomial_wrapping_sub_mul_assign(&mut plaintext_list.as_mut_polynomial(), &ct.as_polynomial_list().get(0), &self.rlwe_sk.as_polynomial_list().get(0));
+        // polynomial_wrapping_sub_mul_assign(&mut plaintext_list.as_mut_polynomial(), &ct.as_polynomial_list().get(1), &s_poly);
+        polynomial_wrapping_add_assign(&mut plaintext_list.as_mut_polynomial(), &ct.as_polynomial_list().get(1));
+
+        plaintext_list.as_mut().iter_mut().for_each(|vi| {
+            *vi = self.div_round(*vi & self.mal_param.ciphertext_mask, self.mal_param.delta) % self.mal_param.plaintext_modulus;
+        });
+
+        plaintext_list.into_container()
+    }
+
+    pub fn decrypt_rlwe_multiplied(&self, ct: &GlweCiphertextOwned<u128>) -> Vec<u128> {
+        let mut plaintext_list = PlaintextList::from_container(vec![0u128; self.mal_param.polynomial_size.0 * (self.mal_param.glwe_size.0 - 1)]);
+
+        let mut s_squared = Polynomial::from_container(vec![0; self.rlwe_sk.polynomial_size().0]);
+        let s_poly = Polynomial::from_container(self.rlwe_sk.as_polynomial_list().into_container());
+        polynomial_wrapping_add_mul_assign(&mut s_squared, &s_poly, &s_poly);
+
+        polynomial_wrapping_add_mul_assign(&mut plaintext_list.as_mut_polynomial(), &ct.as_polynomial_list().get(0), &s_squared);
+        polynomial_wrapping_sub_mul_assign(&mut plaintext_list.as_mut_polynomial(), &ct.as_polynomial_list().get(1), &s_poly);
+        polynomial_wrapping_add_assign(&mut plaintext_list.as_mut_polynomial(), &ct.as_polynomial_list().get(2));
+        // decrypt_glwe_ciphertext(&rlwe_sk_squared, ct, &mut plaintext_list);
 
         plaintext_list.as_mut().iter_mut().for_each(|vi| {
             *vi = self.div_round(*vi & self.mal_param.ciphertext_mask, self.mal_param.delta) % self.mal_param.plaintext_modulus;
