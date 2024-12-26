@@ -1,4 +1,5 @@
 use ppverif_fhe::*;
+use rand::{thread_rng, Rng};
 use tfhe::{boolean::prelude::PolynomialSize, core_crypto::prelude::*};
 use std::time::Instant;
 
@@ -31,7 +32,7 @@ pub fn main() {
     features1[1] = 3.0f32;
     features1[511] = -5.0f32;
 
-    let ggsw = mal_client.encrypt_new_template(0, &features2, 1.0);
+    let ggsw = mal_client.encrypt_new_template_ggsw(0, &features2, 1.0);
     let glwe = mal_client.encrypt_glwe(&features1, 1.0);
     mal_server.enroll_ggsw(0, ggsw);
     let ext_ct = mal_server.external_product(0, &glwe).unwrap();
@@ -56,5 +57,22 @@ pub fn main() {
     let rlwe_relin = mal_server.relinearize(&rlwe_mul);
     let pt_relin = mal_client.decrypt_rlwe(&rlwe_relin);
     // let rlwe_dir_dec = mal_client.decrypt_rlwe_multiplied(&rlwe_mul);
-    println!("relin: {:?}", pt_relin);
+    // println!("relin: {:?}", pt_relin);
+
+
+    let mut f1 = vec![0.0f32; DEFAULT_MALICIOUS_PARAMETER.polynomial_size.0];
+    let mut rng = thread_rng();
+    for vi in f1.iter_mut() {
+        *vi = rng.gen_range(0..10) as f32;
+    }
+    let (d_packed, norm) = mal_client.encrypt_new_template_rlwe(&f1, 1.0);
+    let mut c_cons = LweCiphertext::new(0, LweSize(d_packed.polynomial_size().0 + 1), CiphertextModulus::new_native());
+    mal_server.constraint_norm(&mut c_cons, &d_packed, norm);
+    
+
+    let (d_lut, d_bin) = mal_client.encrypt_new_lookup_tables(0, &d_packed);
+    mal_server.constraint_monomial(&mut c_cons, &d_lut, &d_bin);
+
+    let cons_pt = mal_client.decrypt_lwe(&c_cons);
+    println!("cons f1 norm: {}, norm: {}", cons_pt, norm);
 }

@@ -41,8 +41,8 @@ pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u16> = GlweParameter {
 pub const DEFAULT_MALICIOUS_PARAMETER: GlweParameter<u128> = GlweParameter {
     glwe_size: GlweSize(9),
     polynomial_size: PolynomialSize(512),  // 4096
-    std_dev: 4.0389678347315807e-29,  // 3.2 / (2 ** 96)
-    // std_dev: 0.0,
+    // std_dev: 4.0389678347315807e-29,  // 3.2 / (2 ** 96)
+    std_dev: 0.0,
     // plaintext_modulus: 1u128 << 19,
     // delta: 1u128 << (45 + 32),
     plaintext_modulus: (1u128 << 19) + 21,
