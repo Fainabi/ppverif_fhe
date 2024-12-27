@@ -35,6 +35,34 @@ pub fn extract_glwe_sample_from_rlwe_ciphertext<Scalar, Cont>(glwe_in: &GlweCiph
     GlweCiphertext::from_container(glwe_out_polys, polynomial_size, CiphertextModulus::new_native())
 }
 
+pub fn extract_lwe_sample_from_glwe_ciphertext_under_rlwe_secret_key<Scalar, Cont>(glwe_in: &GlweCiphertext<Cont>)
+    -> LweCiphertextOwned<Scalar>
+    where
+        Scalar: UnsignedInteger,
+        Cont: Container<Element = Scalar>
+{
+    let n = glwe_in.glwe_size().0 - 1;
+    let N = glwe_in.polynomial_size().0;
+    let mask_dim = N * n;
+    let mut lwe_out = LweCiphertext::new(
+        Scalar::ZERO, 
+        LweSize(mask_dim + 1), 
+        CiphertextModulus::new_native()
+    );
+
+    let mut lwe_out_mask = lwe_out.get_mut_mask();
+    for (i, a_i) in glwe_in.get_mask().as_polynomial_list().iter().enumerate() {
+        for (j, v) in a_i.as_ref().iter().enumerate() {
+            lwe_out_mask.as_mut()[(n * ((N - j) % N) + i) % mask_dim] = 
+                if j == 0 { *v } else { Scalar::wrapping_neg(*v) }; 
+        }
+    }
+    *lwe_out.get_mut_body().data = glwe_in.get_body().as_ref()[0];
+
+    lwe_out
+}
+
+
 // assume `t * lhs * rhs` does not overflow w.r.t u256
 pub fn rlwe_multiplication_u96(lhs: &GlweCiphertextOwned<u128>, rhs: &GlweCiphertextOwned<u128>, t: u128) -> GlweCiphertextOwned<u128>
 {
@@ -98,7 +126,7 @@ pub fn rlwe_multiplication_u96(lhs: &GlweCiphertextOwned<u128>, rhs: &GlweCipher
     polynomial_wrapping_add_mul_assign_u96(&mut ct_out_poly.get_mut(1), &lhs_poly_upper[0], &lhs_poly_lower[0], &rhs_poly_upper[1], &rhs_poly_lower[1]);
     polynomial_wrapping_add_mul_assign_u96(&mut ct_out_poly.get_mut(1), &lhs_poly_upper[1], &lhs_poly_lower[1], &rhs_poly_upper[0], &rhs_poly_lower[0]);
     polynomial_wrapping_add_mul_assign_u96(&mut ct_out_poly.get_mut(0), &lhs_poly_upper[0], &lhs_poly_lower[0], &rhs_poly_upper[0], &rhs_poly_lower[0]);
-    ct_out.as_mut().iter_mut().for_each(|v| *v = signed_shr(*v, 32) * t);
+    ct_out.as_mut().iter_mut().for_each(|v| *v = (*v * t) >> 32);
 
     ct_out
 }
@@ -121,16 +149,13 @@ fn polynomial_wrapping_add_mul_assign_u96<OutputCont, LhsContUpper, LhsContLower
     RhsContLower: Container<Element = u128>,
 {
     let mut tmp = Polynomial::new(0, output.polynomial_size());
-    // polynomial_wrapping_mul(&mut tmp, lhs_lower, rhs_lower);
-    // tmp.as_mut().iter_mut().for_each(|v| *v = signed_shr(*v, 32));
     
-
     // TODO: reduce to only two multiplication, and using karatsuba
-    polynomial_wrapping_add_mul_assign(&mut tmp, lhs_lower, rhs_upper);
+    polynomial_karatsuba_wrapping_mul(&mut tmp, lhs_lower, rhs_upper);
     polynomial_wrapping_add_mul_assign(&mut tmp, rhs_lower, lhs_upper);
     tmp.as_mut().iter_mut().for_each(|v| *v = signed_shr(*v, 32));
+    
     polynomial_wrapping_add_mul_assign(&mut tmp, lhs_upper, rhs_upper);
-
     polynomial_wrapping_add_assign(output,&tmp);
 }
 
@@ -141,3 +166,5 @@ fn signed_shr(v: u128, n: usize) -> u128 {
         v >> n
     }
 }
+
+

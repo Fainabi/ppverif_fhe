@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
-use polynomial_algorithms::{polynomial_wrapping_add_assign, polynomial_wrapping_add_mul_assign, polynomial_wrapping_mul};
+use polynomial_algorithms::{polynomial_karatsuba_wrapping_mul, polynomial_wrapping_add_assign, polynomial_wrapping_add_mul_assign, polynomial_wrapping_mul};
 use tfhe::core_crypto::{commons::ciphertext_modulus::CiphertextModulusKind, prelude::*};
 use rand::{rngs::ThreadRng, thread_rng, Rng, RngCore};
-use crate::{params::*, rlwe::{self, *}, utils::*};
+use crate::{params::*, rlwe::*, utils::*};
 
 pub struct Server {
     ip_param: GlweParameter<u64>,
@@ -276,14 +276,18 @@ impl MalServer {
         d_packed: GlweCiphertextOwned<u128>, 
         d_act: GlweCiphertextOwned<u128>, 
         d_bin: GlweCiphertextOwned<u128>
-    ) -> Option<GlweCiphertextOwned<u128>> {
+    ) -> Option<LweCiphertextOwned<u128>> {
         let glwe = extract_glwe_sample_from_rlwe_ciphertext(&d_packed, self.mal_param.polynomial_size);
         match self.external_product(id, &glwe) {
             None => None,
-            Some(c_ip) => {
-                // let d_packed_squared = rlwe_multiplication_u96(&d_packed, &d_packed, t)
+            Some(c_ip_glwe) => {
+                let mut out_lwe = LweCiphertext::new(0, LweSize(d_act.polynomial_size().0 + 1), CiphertextModulus::new_native());
+                let c_ip_lwe = extract_lwe_sample_from_glwe_ciphertext_under_rlwe_secret_key(&c_ip_glwe);
 
-                Some(c_ip)
+                self.constraint_norm(&mut out_lwe, &d_packed, norm);
+                self.constraint_monomial(&mut out_lwe, &d_act, &d_bin);
+                self.constarint_index(&mut out_lwe, &d_act, &d_bin, &c_ip_lwe);
+                Some(out_lwe)
             }
         }
     }
@@ -292,12 +296,18 @@ impl MalServer {
     ///     - d_packed[j] in LWE(0), at the zero coeffs
     ///     - d_packed[i] - d_packed[nN - n - i + 1] in LWE(0), loading templates
     ///     - (d_packed * d_packed)[nN - n + 1] in LWE(norm), for valid templates
-    pub fn constraint_norm(&mut self, out_lwe: &mut LweCiphertextOwned<u128>, d_packed: &GlweCiphertextOwned<u128>, norm: u128) {
+    fn constraint_norm(&mut self, out_lwe: &mut LweCiphertextOwned<u128>, d_packed: &GlweCiphertextOwned<u128>, norm: u128) {
         let n = self.mal_param.glwe_size.0 - 1;
         let N = self.mal_param.polynomial_size.0;
         let poly_dim = d_packed.polynomial_size();
 
-        let d_packed_squared = rlwe_multiplication_u96(d_packed, d_packed, self.mal_param.plaintext_modulus);
+        let r = 1;  // HOW TO enable a greater random number?
+        let mut d_packed_r = d_packed.clone();
+        glwe_ciphertext_cleartext_mul_assign(&mut d_packed_r, Cleartext(r));
+        
+        let mut d_packed_squared = rlwe_multiplication_u96(&d_packed_r, &d_packed_r, self.mal_param.plaintext_modulus);
+        d_packed_squared.get_mut_body().as_mut()[n * (N - 1) + 1] -= (2 * norm * r * r % self.mal_param.plaintext_modulus) * self.mal_param.delta;
+        // glwe_ciphertext_cleartext_mul_assign(&mut d_packed_squared, Cleartext(self.next_rand_ZZ_t_ast() / 2));
         let d_packed_relin = self.relinearize(&d_packed_squared);
 
         let mut tmp_rlwe = d_packed.clone();
@@ -330,14 +340,12 @@ impl MalServer {
 
         // norm to be gamma
         extract_lwe_sample_from_glwe_ciphertext(&d_packed_relin, &mut tmp_lwe, MonomialDegree(n * (N - 1) + 1));
-        *tmp_lwe.get_mut_body().data -= 2 * norm * self.mal_param.delta;
-        lwe_ciphertext_cleartext_mul_assign(&mut tmp_lwe, Cleartext(self.next_rand_ZZ_t_ast()));
+        // *tmp_lwe.get_mut_body().data -= 2 * norm * self.mal_param.delta;
+        // lwe_ciphertext_cleartext_mul_assign(&mut tmp_lwe, Cleartext(self.next_rand_ZZ_t_ast()));
         lwe_ciphertext_add_assign(out_lwe, &tmp_lwe);
     }
 
-    pub fn constraint_monomial(&mut self, out_lwe: &mut LweCiphertextOwned<u128>, d_act: &GlweCiphertextOwned<u128>, d_bin: &GlweCiphertextOwned<u128>) {
-        let n = self.mal_param.glwe_size.0 - 1;
-        let N = self.mal_param.polynomial_size.0;
+    fn constraint_monomial(&mut self, out_lwe: &mut LweCiphertextOwned<u128>, d_act: &GlweCiphertextOwned<u128>, d_bin: &GlweCiphertextOwned<u128>) {
         let poly_dim = d_act.polynomial_size();
 
         let mut tmp_rlwe = d_act.clone();
@@ -345,30 +353,35 @@ impl MalServer {
         let mut tmp_lwe = LweCiphertext::new(0u128, LweSize(poly_dim.0 + 1), CiphertextModulus::new_native());
         let mut tmp_lwe2 = tmp_lwe.clone();
 
-        // Monomial 1: zero coeffs
+        // Monomial 1 & 2: zero coeffs
         // CAUTION: the total plaintext precision needs careful calculation
         let mut zero_cleartext = vec![0u128; poly_dim.0];
+
+        // zero part
         for i in poly_dim.0/4..poly_dim.0/2 {
             zero_cleartext[poly_dim.0 - i] = self.next_rand_ZZ_t_ast();
             zero_cleartext[poly_dim.0 - (i + poly_dim.0/2)] = self.next_rand_ZZ_t_ast();
         }
+
+        // dual part
+        zero_cleartext[0] = self.next_rand_ZZ_t_ast();
+        zero_cleartext[poly_dim.0 / 4 + 1] = zero_cleartext[0];
+        for i in 1..poly_dim.0/4 { 
+            let r = self.next_rand_ZZ_t_ast();
+            zero_cleartext[(poly_dim.0 - i) % poly_dim.0] = r;
+            zero_cleartext[poly_dim.0 - (poly_dim.0 * 3 / 4 - 1 - i)] = u128::wrapping_neg(r) & self.mal_param.ciphertext_mask;
+        }
         let zero_poly = Polynomial::from_container(zero_cleartext);
 
-        for (mut tmp_i, poly_i) in tmp_rlwe.as_mut_polynomial_list().iter_mut().zip(d_act.as_polynomial_list().iter()) {
-            polynomial_wrapping_mul(&mut tmp_i, &poly_i, &zero_poly);
+        for (i, (mut tmp_i, poly_i)) in tmp_rlwe.as_mut_polynomial_list().iter_mut().zip(d_act.as_polynomial_list().iter()).enumerate() {
+            if i == 1 {
+                tmp_i.as_mut()[0] = polynomial_wrapping_mul_constant_term(&poly_i, &zero_poly);
+            } else {
+                polynomial_karatsuba_wrapping_mul(&mut tmp_i, &poly_i, &zero_poly);
+            }
         }
         extract_lwe_sample_from_glwe_ciphertext(&tmp_rlwe, &mut tmp_lwe, MonomialDegree(0));
         lwe_ciphertext_add_assign(out_lwe, &tmp_lwe);
-
-        // Monomial 2: dual coeffs
-        // TODO: optimize by polynomial multiplication
-        for i in 0..poly_dim.0/4 {
-            extract_lwe_sample_from_glwe_ciphertext(&d_act, &mut tmp_lwe, MonomialDegree(i));
-            extract_lwe_sample_from_glwe_ciphertext(&d_act, &mut tmp_lwe2, MonomialDegree(poly_dim.0 * 3 / 4 - 1 - i));
-            lwe_ciphertext_sub_assign(&mut tmp_lwe, &tmp_lwe2);
-            lwe_ciphertext_cleartext_mul_assign(&mut tmp_lwe, Cleartext(self.next_rand_ZZ_t_ast()));
-            lwe_ciphertext_add_assign(out_lwe, &tmp_lwe);
-        }
 
         // Monomial 3 & 4: normalized one
         // TODO: merge relinearization for optimization
@@ -377,19 +390,119 @@ impl MalServer {
         for i in (poly_dim.0/2)..=(poly_dim.0 * 3 / 4 - 1) {
             zero_cleartext[poly_dim.0 - i] = self.next_rand_ZZ_t_ast();
         }
+        
         d_act_squared.get_mut_body().as_mut()[poly_dim.0 * 3 / 4 - 1] -= 2 * self.mal_param.delta;
         let zero_poly = Polynomial::from_container(zero_cleartext);
-        for (mut tmp_i, poly_i) in tmp_rlwe_mul.as_mut_polynomial_list().iter_mut().zip(d_act_squared.as_polynomial_list().iter()) {
-            polynomial_wrapping_mul(&mut tmp_i, &poly_i, &zero_poly);
+        for (i, (mut tmp_i, poly_i)) in tmp_rlwe_mul.as_mut_polynomial_list().iter_mut().zip(d_act_squared.as_polynomial_list().iter()).enumerate() {
+            if i == 2 {
+                tmp_i.as_mut()[0] = polynomial_wrapping_mul_constant_term(&poly_i, &zero_poly);
+            } else {
+                polynomial_karatsuba_wrapping_mul(&mut tmp_i, &poly_i, &zero_poly);
+            }
         }
 
         let d_act_relin = self.relinearize(&d_act_squared);
         extract_lwe_sample_from_glwe_ciphertext(&d_act_relin, &mut tmp_lwe, MonomialDegree(0));
+        // lwe_ciphertext_add_assign(out_lwe, &tmp_lwe);
+
+        // Monomial 5: binaries
+        let plaintext_precision = (self.mal_param.plaintext_modulus as f32).log2().round() as usize + 1;  // CAUTION, ceiling thus modulus should not be power-of-two
+        let rest_precision = plaintext_precision - self.precision;
+
+        let d_bin_squared = rlwe_multiplication_u96(d_bin, d_bin, self.mal_param.plaintext_modulus);
+        let d_bin_relin = self.relinearize(&d_bin_squared);
+        for i in 0..rest_precision+2 {
+            let idx = self.squared_indices[i];
+            extract_lwe_sample_from_glwe_ciphertext(&d_bin_relin, &mut tmp_lwe, MonomialDegree(2 * idx));
+            extract_lwe_sample_from_glwe_ciphertext(&d_bin, &mut tmp_lwe2, MonomialDegree(idx));
+            lwe_ciphertext_sub_assign(&mut tmp_lwe, &tmp_lwe2);
+            lwe_ciphertext_cleartext_mul_assign(&mut tmp_lwe, Cleartext(self.next_rand_ZZ_t_ast()));
+            // lwe_ciphertext_add_assign(out_lwe, &tmp_lwe);
+        }
+
+        // Monomial 6: zeros
+        let mut zero_cleartext = (0..poly_dim.0)
+            .map(|_| self.next_rand_ZZ_t_ast())
+            .collect::<Vec<_>>();
+        for i in 0..rest_precision+2 {
+            let idx = self.squared_indices[i];
+            zero_cleartext[(poly_dim.0 - idx) % poly_dim.0] = 0;
+        }
+        let zero_poly = Polynomial::from_container(zero_cleartext);
+        for (i, (mut tmp_i, poly_i)) in tmp_rlwe.as_mut_polynomial_list().iter_mut().zip(d_bin.as_polynomial_list().iter()).enumerate() {
+            if i == 1 {
+                tmp_i.as_mut()[0] = polynomial_wrapping_mul_constant_term(&poly_i, &zero_poly);
+            } else {
+                polynomial_karatsuba_wrapping_mul(&mut tmp_i, &poly_i, &zero_poly);
+            }
+        }
+        extract_lwe_sample_from_glwe_ciphertext(&tmp_rlwe, &mut tmp_lwe, MonomialDegree(0));
         lwe_ciphertext_add_assign(out_lwe, &tmp_lwe);
+    }
 
+    fn constarint_index(
+        &mut self, 
+        out_lwe: &mut LweCiphertextOwned<u128>, 
+        d_act: &GlweCiphertextOwned<u128>, 
+        d_bin: &GlweCiphertextOwned<u128>, 
+        c_ip: &LweCiphertextOwned<u128>
+    ) {
+        let poly_dim = d_act.polynomial_size();
 
+        let mut tmp_rlwe = d_act.clone();
+        let mut tmp_lwe = LweCiphertext::new(0u128, LweSize(poly_dim.0 + 1), CiphertextModulus::new_native());
+        let mut tmp_lwe2 = tmp_lwe.clone();
 
-        let rest_precision = (self.mal_param.plaintext_modulus as f32).log2().round() as usize + 1 - self.precision;  
+        let plaintext_precision = (self.mal_param.plaintext_modulus as f32).log2().round() as usize + 1;  // CAUTION, ceiling thus modulus should not be power-of-two
+        let rest_precision = plaintext_precision - self.precision;
+        let mut lut = vec![0u128; poly_dim.0];
+        let prec_cap = 1 << self.precision;
+        for i in 1..prec_cap {
+            lut[poly_dim.0 - i] = u128::wrapping_neg((i as u128) << rest_precision);
+        }
+        let lut_poly = Polynomial::from_container(lut);
+        for (i, (mut tmp_i, poly_i)) in tmp_rlwe.as_mut_polynomial_list().iter_mut().zip(d_act.as_polynomial_list().iter()).enumerate() {
+            if i == 1 {
+                tmp_i.as_mut()[0] = polynomial_wrapping_mul_constant_term(&poly_i, &lut_poly);
+            } else {
+                polynomial_karatsuba_wrapping_mul(&mut tmp_i, &poly_i, &lut_poly);
+            }
+        }
+        extract_lwe_sample_from_glwe_ciphertext(&tmp_rlwe, &mut tmp_lwe, MonomialDegree(0));
+
+        for i in 0..rest_precision {
+            let idx = self.squared_indices[i];
+            extract_lwe_sample_from_glwe_ciphertext(d_bin, &mut tmp_lwe2, MonomialDegree(idx));
+            lwe_ciphertext_cleartext_mul_assign(&mut tmp_lwe2, Cleartext(1 << i));
+            lwe_ciphertext_add_assign(&mut tmp_lwe, &tmp_lwe2);
+        }
+
+        lwe_ciphertext_opposite_assign(&mut tmp_lwe);
+        for (tmp_i, c_i) in tmp_lwe.get_mut_mask().as_mut().iter_mut().zip(c_ip.get_mask().as_ref().iter()) {
+            *tmp_i += *c_i;
+        }
+        // lwe_ciphertext_add_assign(&mut tmp_lwe, c_ip);
+        println!("b: {}", *c_ip.get_body().data & self.mal_param.ciphertext_mask);
+        let b_delta = *c_ip.get_body().data % self.mal_param.delta;
+        *tmp_lwe.get_mut_body().data += b_delta - self.mal_param.delta;
+        
+        // correction flag, set a very loose boundary of Delta/4
+        if b_delta < self.mal_param.delta / 4 {
+            // u_plus
+            println!("***small***");
+            // extract_lwe_sample_from_glwe_ciphertext(d_bin, &mut tmp_lwe2, MonomialDegree(rest_precision));
+            // lwe_ciphertext_add_assign(&mut tmp_lwe, &tmp_lwe2);
+        } else if b_delta > self.mal_param.delta * 3 / 4 {
+            // u_minus
+            println!("***great***");
+            // extract_lwe_sample_from_glwe_ciphertext(d_bin, &mut tmp_lwe2, MonomialDegree(rest_precision + 1));
+            // lwe_ciphertext_sub_assign(&mut tmp_lwe, &tmp_lwe2);
+        }        
+
+        // mask with r
+        lwe_ciphertext_cleartext_mul_assign(&mut tmp_lwe, Cleartext(self.next_rand_ZZ_t_ast()));
+
+        lwe_ciphertext_add_assign(out_lwe, &tmp_lwe);
     }
 
     fn next_rand_ZZ_t_ast(&mut self) -> u128 {

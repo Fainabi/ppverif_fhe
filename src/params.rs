@@ -41,14 +41,14 @@ pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u16> = GlweParameter {
 pub const DEFAULT_MALICIOUS_PARAMETER: GlweParameter<u128> = GlweParameter {
     glwe_size: GlweSize(9),
     polynomial_size: PolynomialSize(512),  // 4096
-    // std_dev: 4.0389678347315807e-29,  // 3.2 / (2 ** 96)
-    std_dev: 0.0,
+    std_dev: 4.0389678347315807e-29,  // 3.2 / (2 ** 96)
+    // std_dev: 0.0,
     // plaintext_modulus: 1u128 << 19,
     // delta: 1u128 << (45 + 32),
-    plaintext_modulus: (1u128 << 19) + 21,
+    plaintext_modulus: (1u128 << 19) + 21, // 524309
     delta: 151109674856362064342866u128,  // (2**96) / ((2**19) + 21)
     decomposition_base_log: DecompositionBaseLog(32),
-    decomposition_level_count: DecompositionLevelCount(2),
+    decomposition_level_count: DecompositionLevelCount(3),
     ciphertext_mask: 0xFFFFFFFF_FFFFFFFF_FFFFFFFF,  // 2^96
 };
 

@@ -914,6 +914,7 @@ impl MalClient {
         let plaintext_precision = (self.mal_param.plaintext_modulus as f32).log2().round() as usize + 1;  // CAUTION, ceiling thus modulus should not be power-of-two
         let masks_for_innerprod_act = masks_plaintext >> (plaintext_precision - self.precision);
         let poly_dim = d_packed.polynomial_size();
+        println!("client precision: {}, rest_precision: {}, plaintext precision: {}", self.precision, plaintext_precision - self.precision, (masks_for_innerprod_act as f32).log2());
 
         // construct the selector
         let mut d_act = GlweCiphertext::new(
@@ -925,8 +926,8 @@ impl MalClient {
 
         // monomial
         let mut d_act_body = d_act.get_mut_body();
-        d_act_body.as_mut()[br_polydim - 1 - masks_for_innerprod_act as usize] = self.mal_param.delta;
-        d_act_body.as_mut()[poly_dim.0/2 + masks_for_innerprod_act as usize] = self.mal_param.delta; // counter part
+        d_act_body.as_mut()[masks_for_innerprod_act as usize] = self.mal_param.delta;
+        d_act_body.as_mut()[poly_dim.0/2 + br_polydim - 1 - masks_for_innerprod_act as usize] = self.mal_param.delta; // counter part
         
         encrypt_glwe_ciphertext_assign(
             &self.rlwe_sk,
@@ -936,25 +937,27 @@ impl MalClient {
         );
         
         // binaries
-        let rest_noise = self.mal_param.delta - (masks_for_innerprod % self.mal_param.delta);
+        println!("mask ip: {}", masks_for_innerprod & self.mal_param.ciphertext_mask);        
         let rest_precision = plaintext_precision - self.precision;
+        let rest_mask = masks_plaintext & ((1 << rest_precision) - 1);
         let mut d_bin = GlweCiphertext::new(
             0u128,
             GlweSize(2),
             poly_dim,
             CiphertextModulus::new_native()
         );
+        println!("act mask: {}, rest mask: {}, plaintext: {}", masks_for_innerprod_act, rest_mask, masks_plaintext);
 
         let mut d_bin_body = d_bin.get_mut_body();
         for i in 0..rest_precision {
             // little endian
-            if (rest_noise >> i) & 0x1 == 1 {
+            if (rest_mask >> i) & 0x1 == 1 {
                 d_bin_body.as_mut()[self.squared_indices[i]] = self.mal_param.delta;
             }
         }
 
         // correction flag
-        let (u_plus, u_minus) = if rest_noise < self.mal_param.delta / 2 {
+        let (u_plus, u_minus) = if rest_mask < self.mal_param.plaintext_modulus / 2 {
             (1, 0)
         } else {
             (0, 1)
