@@ -1,4 +1,5 @@
 use rand::*;
+use tfhe::core_crypto::commons::math::torus::FromTorus;
 use tfhe::core_crypto::prelude::*;
 use tfhe::core_crypto::commons::math::random::*;
 use tfhe::core_crypto::algorithms::polynomial_algorithms::*;
@@ -484,6 +485,7 @@ pub struct MalClient {
     // key for encrypting templates and performing inner product
     rlwe_sk: GlweSecretKeyOwned<u128>,
     glwe_sk: GlweSecretKeyOwned<u128>,  // rearranged from rlwe_sk
+    rlwe_sk_squared: GlweSecretKeyOwned<u128>,
 
     // global seed for masking templates
     id_seeder: IdSeeder,
@@ -497,6 +499,10 @@ pub struct MalClient {
 
     threshold: usize,  // always assume threshold to be non-negative in the current implementations
     precision: usize,
+
+    // rlwe relin
+    rlwe_dcp_log: DecompositionBaseLog,
+    rlwe_dcp_count: DecompositionLevelCount,
 }
 
 impl MalClient {
@@ -523,19 +529,40 @@ impl MalClient {
         }
 
         let glwe_sk = GlweSecretKey::from_container(glwe_sk, mal_param.polynomial_size);
+        let mut rlwe_sk_squared = PolynomialList::new(0, rlwe_sk.polynomial_size(), PolynomialCount(2));
+        polynomial_wrapping_add_assign(&mut rlwe_sk_squared.get_mut(1), &rlwe_sk.as_polynomial_list().get(0)); 
+        polynomial_wrapping_mul(&mut rlwe_sk_squared.get_mut(0), &rlwe_sk.as_polynomial_list().get(0), &rlwe_sk.as_polynomial_list().get(0));
+        rlwe_sk_squared.get_mut(0).iter_mut().for_each(|v| *v = u128::wrapping_neg(*v));
+        let rlwe_sk_squared = GlweSecretKey::from_container(rlwe_sk_squared.into_container(), rlwe_sk.polynomial_size());
+        
 
         let mut rng = thread_rng();
+        let distribution = Gaussian::from_standard_dev(StandardDev(mal_param.std_dev), 0.0);
+        // println!("{:?}, {}", distribution.standard_dev().get_log_standard_dev(), generate_one);
+        
+        let mut generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            seeder.seed(),
+            seeder.as_mut(),
+        );
+        let mut generator = RandomGenerator::<ActivatedRandomGenerator>::new(
+            seeder.seed(),
+        );
+        let (s1, _) = <(f64, f64)>::generate_one(&mut generator, distribution);
+        println!("{:?} and {}", s1, <u128 as FromTorus<f64>>::from_torus(s1));
 
         Self {
             mal_param,
             rlwe_sk,
             glwe_sk,
-            distribution: Gaussian::from_dispersion_parameter(StandardDev(mal_param.std_dev), 0.0),
+            rlwe_sk_squared,
+            distribution,
             id_seeder: IdSeeder::new(((rng.next_u64() as u128) << 64) | (rng.next_u64() as u128)),
             noise_seeder: seeder,
             squared_indices: find_valid_squared_indices(N * n),
             threshold: 0,
-            precision: ((N * n) as f32).log2().round() as usize - 2,  // log (Nn / 4)
+            precision: ((N * n) as f32).log2().round() as usize - 2,  // log (Nn / 4),
+            rlwe_dcp_log: DecompositionBaseLog(48),
+            rlwe_dcp_count: DecompositionLevelCount(1),
         }
     }
 
@@ -575,12 +602,12 @@ impl MalClient {
             self.noise_seeder.as_mut(),
         );
 
-        (0..self.mal_param.decomposition_level_count.0)
+        (0..self.rlwe_dcp_count.0)
             .map(|beta_idx| {
-                let idx = self.mal_param.decomposition_level_count.0 - beta_idx;
+                let idx = self.rlwe_dcp_count.0 - beta_idx;
                 let s_squared_i = s_squared
                     .iter()
-                    .map(|&vi| vi * (1 << (idx * self.mal_param.decomposition_base_log.0)))
+                    .map(|&vi| vi * (1 << (idx * self.rlwe_dcp_log.0)))
                     .collect::<Vec<_>>();
                 let s_squared_i_poly = Polynomial::from_container(s_squared_i);
 
@@ -707,9 +734,16 @@ impl MalClient {
 
     pub fn decrypt_lwe(&self, ct: &LweCiphertextOwned<u128>) -> u128 {
         let pt = decrypt_lwe_ciphertext(&self.rlwe_sk.as_lwe_secret_key(), ct);
+        println!("pt: {}", pt.0 & self.mal_param.ciphertext_mask);
         self.div_round(pt.0 & self.mal_param.ciphertext_mask, self.mal_param.delta) % self.mal_param.plaintext_modulus
     }
     
+    pub fn decrypt_lwe_dbl_len(&self, ct: &LweCiphertextOwned<u128>) -> u128 {
+        let pt = decrypt_lwe_ciphertext(&self.rlwe_sk_squared.as_lwe_secret_key(), ct);
+        println!("pt: {}", pt.0 & self.mal_param.ciphertext_mask);
+        self.div_round(pt.0 & self.mal_param.ciphertext_mask, self.mal_param.delta) % self.mal_param.plaintext_modulus
+    }
+
     /// Encrypt a new template with a given ID. The ciphertexts are GGSW ciphertexts but only body needs transferring.
     /// The layout of GGSW ciphertexts is 
     ///     Glev { poly * s_0 }
@@ -828,6 +862,7 @@ impl MalClient {
         );
 
         encrypt_glwe_ciphertext_assign(&self.rlwe_sk, &mut rlwe, self.distribution, &mut encryption_generator);
+
 
         (rlwe, norm)
     }

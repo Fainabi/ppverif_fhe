@@ -1,6 +1,6 @@
 use ppverif_fhe::*;
 use rand::{thread_rng, Rng};
-use tfhe::{boolean::prelude::PolynomialSize, core_crypto::prelude::*};
+use tfhe::{boolean::prelude::{PolynomialSize, DEFAULT_PARAMETERS_KS_PBS}, core_crypto::prelude::*};
 use std::time::Instant;
 
 pub fn main() {
@@ -53,12 +53,12 @@ pub fn main() {
     let rlwe2 = mal_client.encrypt_rlwe(&features_rlwe_2, 1.0);
     // let rlwe2 = GlweCiphertext::from_container(features_rlwe_2, rlwe1.polynomial_size(), CiphertextModulus::new_native());
     // let mut rlwe_mul = GlweCiphertext::new(0, GlweSize(3), PolynomialSize(features_rlwe_1.len()), CiphertextModulus::new_native());
-    let rlwe_mul = rlwe_multiplication_u96(&rlwe1, &rlwe2, DEFAULT_MALICIOUS_PARAMETER.plaintext_modulus);
-    let rlwe_relin = mal_server.relinearize(&rlwe_mul);
-    let pt_relin = mal_client.decrypt_rlwe(&rlwe_relin);
-    let rlwe_dir_dec = mal_client.decrypt_rlwe_multiplied(&rlwe_mul);
-    println!("relin: {:?}", &pt_relin[..10]);
-    println!("dir_dec: {:?}", &rlwe_dir_dec[..10]);
+    // let rlwe_mul = rlwe_multiplication_u96(&rlwe1, &rlwe2, DEFAULT_MALICIOUS_PARAMETER.plaintext_modulus);
+    // let rlwe_relin = mal_server.relinearize(&rlwe_mul);
+    // let pt_relin = mal_client.decrypt_rlwe(&rlwe_relin);
+    // let rlwe_dir_dec = mal_client.decrypt_rlwe_multiplied(&rlwe_mul);
+    // println!("relin: {:?}", &pt_relin[..10]);
+    // println!("dir_dec: {:?}", &rlwe_dir_dec[..10]);
 
     
     let mut f1 = vec![0.0f32; DEFAULT_MALICIOUS_PARAMETER.polynomial_size.0];

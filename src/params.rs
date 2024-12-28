@@ -2,6 +2,8 @@ use aligned_vec::ABox;
 use concrete_fft::c64;
 use tfhe::core_crypto::prelude::*;
 
+
+
 #[derive(Debug, Copy, Clone)]
 pub struct GlweParameter<Scalar> {
     pub glwe_size: GlweSize,
@@ -40,15 +42,27 @@ pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u16> = GlweParameter {
 /// RLWE parameter, modulo (2 ** 96)
 pub const DEFAULT_MALICIOUS_PARAMETER: GlweParameter<u128> = GlweParameter {
     glwe_size: GlweSize(9),
-    polynomial_size: PolynomialSize(512),  // 4096
-    std_dev: 4.0389678347315807e-29,  // 3.2 / (2 ** 96)
+    polynomial_size: PolynomialSize(512),  // 4096 dim for RLWE
+    std_dev: 9.4039548065783e-39,  // 3.2 / (2 ** 128) as the Torus for CiphertextModulus::native_modulus() in u128
+    // std_dev: 1.7347234759768072e-19,
     // std_dev: 0.0,
     // plaintext_modulus: 1u128 << 19,
     // delta: 1u128 << (45 + 32),
     plaintext_modulus: (1u128 << 19) + 21, // 524309
     delta: 151109674856362064342866u128,  // (2**96) / ((2**19) + 21)
     decomposition_base_log: DecompositionBaseLog(32),
-    decomposition_level_count: DecompositionLevelCount(3),
+    decomposition_level_count: DecompositionLevelCount(2),
+    ciphertext_mask: 0xFFFFFFFF_FFFFFFFF_FFFFFFFF,  // 2^96
+};
+
+pub const DEFAULT_MALICIOUS_PARAMETER_RLWE: GlweParameter<u128> = GlweParameter {
+    glwe_size: GlweSize(2),
+    polynomial_size: PolynomialSize(4096),  // 4096 dim for RLWE
+    std_dev: 9.4039548065783e-39,  // 3.2 / (2 ** 128) as the Torus for CiphertextModulus::native_modulus() in u128
+    plaintext_modulus: (1u128 << 19) + 21, // 524309
+    delta: 151109674856362064342866u128,  // (2**96) / ((2**19) + 21)
+    decomposition_base_log: DecompositionBaseLog(48),
+    decomposition_level_count: DecompositionLevelCount(1),
     ciphertext_mask: 0xFFFFFFFF_FFFFFFFF_FFFFFFFF,  // 2^96
 };
 
