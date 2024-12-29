@@ -538,17 +538,6 @@ impl MalClient {
 
         let mut rng = thread_rng();
         let distribution = Gaussian::from_standard_dev(StandardDev(mal_param.std_dev), 0.0);
-        // println!("{:?}, {}", distribution.standard_dev().get_log_standard_dev(), generate_one);
-        
-        let mut generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
-            seeder.seed(),
-            seeder.as_mut(),
-        );
-        let mut generator = RandomGenerator::<ActivatedRandomGenerator>::new(
-            seeder.seed(),
-        );
-        let (s1, _) = <(f64, f64)>::generate_one(&mut generator, distribution);
-        println!("{:?} and {}", s1, <u128 as FromTorus<f64>>::from_torus(s1));
 
         Self {
             mal_param,
@@ -737,11 +726,53 @@ impl MalClient {
         println!("pt: {}", pt.0 & self.mal_param.ciphertext_mask);
         self.div_round(pt.0 & self.mal_param.ciphertext_mask, self.mal_param.delta) % self.mal_param.plaintext_modulus
     }
+
+    pub fn decrypt_lwe_u56(&self, ct: &LweCiphertextOwned<u64>) -> u64 {
+        let sk = LweSecretKey::from_container(self.rlwe_sk.as_lwe_secret_key().as_ref().iter().map(|&v| (v & 0xFFFFFFFF_FFFFFFFF) as u64).collect::<Vec<_>>());
+        let pt = decrypt_lwe_ciphertext(&sk, ct);
+        println!("pt: {}", pt.0 & 0xFFFFFFFF_FFFFFFFF);
+        self.div_round(pt.0 & 0x00FFFFFF_FFFFFFFF, ((1u128 << 56) / self.mal_param.plaintext_modulus) as u64) % self.mal_param.plaintext_modulus as u64
+    }
     
     pub fn decrypt_lwe_dbl_len(&self, ct: &LweCiphertextOwned<u128>) -> u128 {
         let pt = decrypt_lwe_ciphertext(&self.rlwe_sk_squared.as_lwe_secret_key(), ct);
         println!("pt: {}", pt.0 & self.mal_param.ciphertext_mask);
         self.div_round(pt.0 & self.mal_param.ciphertext_mask, self.mal_param.delta) % self.mal_param.plaintext_modulus
+    }
+
+    pub fn decrypt_lwe_dbl_len_u48(&self, ct: &LweCiphertextOwned<u64>) -> u64 {
+        let sk = LweSecretKey::from_container(self.rlwe_sk_squared.as_lwe_secret_key().as_ref().iter().map(|&v| (v & 0xFFFFFFFF_FFFFFFFF) as u64).collect::<Vec<_>>());
+        let pt = decrypt_lwe_ciphertext(&sk, ct);
+        // println!("key: {:?}", sk);
+        println!("pt: {}", pt.0 & 0xFFFFFFFF_FFFFFFFF);
+        // println!("{}", (1u128 << 48) / self.mal_param.plaintext_modulus);
+        // (pt.0 as f64 / ((1u128 << 48) as f64 / self.mal_param.plaintext_modulus as f64)).round() as u64 % self.mal_param.plaintext_modulus as u64
+        // (self.div_round(pt.0 as u128, ((1u128 << 48) / self.mal_param.plaintext_modulus)) % self.mal_param.plaintext_modulus) as u64
+
+        (self.div_round((0x0000FFFF_FFFFFFFF & pt.0 as u128) * self.mal_param.plaintext_modulus, 1u128 << 48) % self.mal_param.plaintext_modulus) as u64
+    }
+
+    pub fn decrypt_lwe_dbl_len_u56(&self, ct: &LweCiphertextOwned<u64>) -> u64 {
+        let sk = LweSecretKey::from_container(self.rlwe_sk_squared.as_lwe_secret_key().as_ref().iter().map(|&v| (v & 0xFFFFFFFF_FFFFFFFF) as u64).collect::<Vec<_>>());
+        let pt = decrypt_lwe_ciphertext(&sk, ct);
+        println!("pt: {}", pt.0 & 0xFFFFFFFF_FFFFFFFF);
+        self.div_round(pt.0, ((1u128 << 56) / self.mal_param.plaintext_modulus) as u64) % self.mal_param.plaintext_modulus as u64
+    }
+
+    pub fn decrypt_lwe_dbl_len_u64(&self, ct: &LweCiphertextOwned<u64>) -> u64 {
+        let sk = LweSecretKey::from_container(self.rlwe_sk_squared.as_lwe_secret_key().as_ref().iter().map(|&v| (v & 0xFFFFFFFF_FFFFFFFF) as u64).collect::<Vec<_>>());
+        let pt = decrypt_lwe_ciphertext(&sk, ct);
+        println!("pt: {}", pt.0 & 0xFFFFFFFF_FFFFFFFF);
+        self.div_round(pt.0, ((1u128 << 64) / self.mal_param.plaintext_modulus) as u64) % self.mal_param.plaintext_modulus as u64
+    }
+
+    pub fn decrypt_lwe_dbl_len_u32(&self, ct: &LweCiphertextOwned<u64>) -> u64 {
+        let sk = LweSecretKey::from_container(self.rlwe_sk_squared.as_lwe_secret_key().as_ref().iter().map(|&v| (v & 0xFFFFFFFF_FFFFFFFF) as u64).collect::<Vec<_>>());
+        let pt = decrypt_lwe_ciphertext(&sk, ct);
+        println!("pt: {}", pt.0 & 0xFFFFFFFF_FFFFFFFF);
+        (self.div_round(pt.0 as u128 * self.mal_param.plaintext_modulus, 1u128 << 32) % self.mal_param.plaintext_modulus) as u64
+        // ((pt.0 & 0xFFFFFFFF) as f64 / ((1u128 << 32) as f64 / self.mal_param.plaintext_modulus as f64)).round() as u64 % self.mal_param.plaintext_modulus as u64
+        // self.div_round(pt.0, ((1u128 << 32) / self.mal_param.plaintext_modulus) as u64) % self.mal_param.plaintext_modulus as u64
     }
 
     /// Encrypt a new template with a given ID. The ciphertexts are GGSW ciphertexts but only body needs transferring.
@@ -1025,11 +1056,13 @@ impl MalClient {
             .collect()
     }
 
-    fn div_round(&self, v: u128, delta: u128) -> u128 {
+    fn div_round<T>(&self, v: T, delta: T) -> T 
+        where T: UnsignedInteger
+    {
         let q = v / delta;
         let r = v % delta;
-        if r >= delta / 2 {
-            q + 1
+        if r >= delta / T::TWO {
+            q + T::ONE
         } else {
             q
         }

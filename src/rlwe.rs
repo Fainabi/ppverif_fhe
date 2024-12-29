@@ -1,5 +1,5 @@
 use tfhe::core_crypto::prelude::*;
-use polynomial_algorithms::{polynomial_karatsuba_wrapping_mul, polynomial_wrapping_add_assign, polynomial_wrapping_add_mul_assign, polynomial_wrapping_mul};
+use polynomial_algorithms::{polynomial_karatsuba_wrapping_mul, polynomial_wrapping_add_assign, polynomial_wrapping_add_mul_assign};
 
 #[allow(non_snake_case)]
 pub fn extract_glwe_sample_from_rlwe_ciphertext<Scalar, Cont>(glwe_in: &GlweCiphertext<Cont>, polynomial_size: PolynomialSize) 
@@ -166,5 +166,3 @@ fn signed_shr(v: u128, n: usize) -> u128 {
         v >> n
     }
 }
-
-

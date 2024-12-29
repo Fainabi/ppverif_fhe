@@ -17,11 +17,11 @@ pub fn main() {
     let rlwe = mal_client.encrypt_rlwe(&features, 1.0f32);
     let glwe = extract_glwe_sample_from_rlwe_ciphertext(&rlwe, DEFAULT_MALICIOUS_PARAMETER.polynomial_size);
     
-    let decrypted_rlwe = mal_client.decrypt_rlwe(&rlwe);
-    println!("{:?}, len: {}", decrypted_rlwe, decrypted_rlwe.len());
+    // let decrypted_rlwe = mal_client.decrypt_rlwe(&rlwe);
+    // println!("{:?}, len: {}", decrypted_rlwe, decrypted_rlwe.len());
 
-    let decrypted = mal_client.decrypt_glwe(&glwe);
-    println!("{:?}, len: {}", decrypted, decrypted.len());
+    // let decrypted = mal_client.decrypt_glwe(&glwe);
+    // println!("{:?}, len: {}", decrypted, decrypted.len());
 
 
     let mut features1 = vec![0.0f32; DEFAULT_MALICIOUS_PARAMETER.polynomial_size.0];
@@ -63,8 +63,8 @@ pub fn main() {
     
     let mut f1 = vec![0.0f32; DEFAULT_MALICIOUS_PARAMETER.polynomial_size.0];
     let mut rng = thread_rng();
-    for vi in f1.iter_mut() {
-        *vi = rng.gen_range(0..10) as f32;
+    for vi in f1.iter_mut().take(1) {
+        *vi = 5.0; rng.gen_range(0..10) as f32;
     }
     let (d_packed, norm) = mal_client.encrypt_new_template_rlwe(&f1, 1.0);
     let d_glwe = extract_glwe_sample_from_rlwe_ciphertext(&d_packed, DEFAULT_MALICIOUS_PARAMETER.polynomial_size);
@@ -75,18 +75,21 @@ pub fn main() {
     println!("pt_ext: {:?}", pt_ext);
     println!("pt_ext_lwe: {:?}", pt_ext_lwe);
 
-    let time = Instant::now();
+    
     // let mut c_cons = LweCiphertext::new(0, LweSize(d_packed.polynomial_size().0 + 1), CiphertextModulus::new_native());
     // mal_server.constraint_norm(&mut c_cons, &d_packed, norm);    
 
     let (d_act, d_bin) = mal_client.encrypt_new_lookup_tables(0, &d_packed);
+    let time = Instant::now();
     // mal_server.constraint_monomial(&mut c_cons, &d_act, &d_bin);
     // mal_server.constarint_index(&mut c_cons, &d_act, &d_bin);
-    let c_cons = mal_server.construct_constraints(0, norm, d_packed, d_act, d_bin).unwrap();
+    let c_cons_64 = mal_server.construct_constraints(0, norm, d_packed, d_act, d_bin).unwrap();
 
     let elapsed = time.elapsed();
     println!("time: {:?} millis", elapsed.as_micros() as f32 / 1000.0);
 
-    let cons_pt = mal_client.decrypt_lwe(&c_cons);
-    println!("cons f1 norm: {}, norm: {}", cons_pt, norm);
+    // let c_cons_64 = LweCiphertext::from_container(c_cons.as_ref().into_iter().map(|v| ((v >> 32) & 0xFFFFFFFF_FFFFFFFF) as u64).collect::<Vec<_>>(), CiphertextModulus::new_native());
+    // let cons_pt = mal_client.decrypt_lwe(&c_cons);
+    let cons_pt_64 = mal_client.decrypt_lwe(&c_cons_64);
+    println!("cons pt 64: {}, norm: {}", cons_pt_64, norm);
 }
