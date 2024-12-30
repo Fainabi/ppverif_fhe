@@ -1,5 +1,14 @@
 use tfhe::core_crypto::prelude::*;
 use polynomial_algorithms::{polynomial_karatsuba_wrapping_mul, polynomial_wrapping_add_assign, polynomial_wrapping_add_mul_assign};
+use fhe::bfv;
+
+// pub fn extract_lwe_sample_from_rlwe_ciphertext(rlwe: &bfv::Ciphertext) -> LweCiphertextOwned<u64> {
+//     let mut rlwe = rlwe.clone();
+//     rlwe.mod_switch_to_last_level();
+//     let (b, a) = (rlwe[0], rlwe[1]);
+//     LweCiphertext
+// }
+
 
 #[allow(non_snake_case)]
 pub fn extract_glwe_sample_from_rlwe_ciphertext<Scalar, Cont>(glwe_in: &GlweCiphertext<Cont>, polynomial_size: PolynomialSize) 

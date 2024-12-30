@@ -1,8 +1,22 @@
-use rand::*;
-use tfhe::core_crypto::commons::math::torus::FromTorus;
+use fhe_math::rq::traits::TryConvertFrom;
+use rand::{rngs::OsRng, *};
 use tfhe::core_crypto::prelude::*;
 use tfhe::core_crypto::commons::math::random::*;
 use tfhe::core_crypto::algorithms::polynomial_algorithms::*;
+use fhe::bfv::{
+    self,
+    Ciphertext as BfvCiphertext,
+    BfvParameters,
+    RGSWCiphertext,
+};
+use fhe::Result;
+use fhe_math::rq::Representation::PowerBasis;
+use fhe_traits::*;
+use std::borrow::BorrowMut;
+use std::error::Error;
+use std::sync::Arc;
+use std::collections::BTreeMap;
+
 use crate::extract_glwe_sample_from_rlwe_ciphertext;
 use crate::params::*;
 use crate::utils::*;
@@ -260,70 +274,70 @@ impl Client {
         cts
     }
 
-    /// Create Glwe ciphertexts encrypting monomials
-    /// The server verifies that the encrypted message is $X^b$ by two tests:
-    ///     1. (monomial) ct acts on [1,1,...,1] would yield [1,1,...,1]
-    ///     2. (faithful) ct acts on [0,1,...,n-1] would yield $b$ at the constant part
-    /// Since $b$ is rounded, or decomposed, we need several Glwe Ciphertexts for wrapping these values
-    pub fn transform_mask_to_glwe(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>)
-        -> Vec<(GlweCiphertextOwned<u64>, GlweCiphertextOwned<u64>)>
-    {
-        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
-            self.noise_seeder.seed(),
-            self.noise_seeder.as_mut(),
-        );
+    // /// Create Glwe ciphertexts encrypting monomials
+    // /// The server verifies that the encrypted message is $X^b$ by two tests:
+    // ///     1. (monomial) ct acts on [1,1,...,1] would yield [1,1,...,1]
+    // ///     2. (faithful) ct acts on [0,1,...,n-1] would yield $b$ at the constant part
+    // /// Since $b$ is rounded, or decomposed, we need several Glwe Ciphertexts for wrapping these values
+    // pub fn transform_mask_to_glwe(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>)
+    //     -> Vec<(GlweCiphertextOwned<u64>, GlweCiphertextOwned<u64>)>
+    // {
+    //     let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+    //         self.noise_seeder.seed(),
+    //         self.noise_seeder.as_mut(),
+    //     );
 
-        let masks_for_innerprod = self.transform_mask_to_body(id, glwe_ct);
-        let br_polydim = 1usize << self.precision;
+    //     let masks_for_innerprod = self.transform_mask_to_body(id, glwe_ct);
+    //     let br_polydim = 1usize << self.precision;
 
-        let carry = masks_for_innerprod & (1 << (63 - self.precision));
-        let masks_for_innerprod_act = u64::wrapping_add(masks_for_innerprod >> (64 - self.precision), carry >> (63 - self.precision));
+    //     let carry = masks_for_innerprod & (1 << (63 - self.precision));
+    //     let masks_for_innerprod_act = u64::wrapping_add(masks_for_innerprod >> (64 - self.precision), carry >> (63 - self.precision));
 
-        // construct the selector
-        let mut ct_act = GlweCiphertext::new(
-            0u64,
-            self.ip_param.glwe_size,
-            self.ip_param.polynomial_size,
-            CiphertextModulus::new_native()
-        );
-        let mut ct_act_inv = GlweCiphertext::new(
-            0u64,
-            self.ip_param.glwe_size,
-            self.ip_param.polynomial_size,
-            CiphertextModulus::new_native()
-        );
+    //     // construct the selector
+    //     let mut ct_act = GlweCiphertext::new(
+    //         0u64,
+    //         self.ip_param.glwe_size,
+    //         self.ip_param.polynomial_size,
+    //         CiphertextModulus::new_native()
+    //     );
+    //     let mut ct_act_inv = GlweCiphertext::new(
+    //         0u64,
+    //         self.ip_param.glwe_size,
+    //         self.ip_param.polynomial_size,
+    //         CiphertextModulus::new_native()
+    //     );
 
 
-        let mut cleartext = vec![0; self.ip_param.polynomial_size.0];
+    //     let mut cleartext = vec![0; self.ip_param.polynomial_size.0];
 
-        // monomial
-        cleartext[(br_polydim - masks_for_innerprod_act as usize) % br_polydim] = self.ip_param.delta;
+    //     // monomial
+    //     cleartext[(br_polydim - masks_for_innerprod_act as usize) % br_polydim] = self.ip_param.delta;
 
-        let plaintext = PlaintextList::from_container(cleartext.clone());
-        encrypt_glwe_ciphertext(
-            &self.glwe_sk_ip,
-            &mut ct_act,
-            &plaintext,
-            self.distribution_ip,
-            &mut encryption_generator
-        );
+    //     let plaintext = PlaintextList::from_container(cleartext.clone());
+    //     encrypt_glwe_ciphertext(
+    //         &self.glwe_sk_ip,
+    //         &mut ct_act,
+    //         &plaintext,
+    //         self.distribution_ip,
+    //         &mut encryption_generator
+    //     );
 
-        // proof for monomial
-        if masks_for_innerprod_act as usize != br_polydim {
-            cleartext[(br_polydim - masks_for_innerprod_act as usize) % br_polydim] = 0;
-            cleartext[(br_polydim - masks_for_innerprod_act as usize) % br_polydim] =
-                u64::wrapping_sub(0, self.ip_param.delta);
-        }
-        encrypt_glwe_ciphertext(
-            &self.glwe_sk_ip,
-            &mut ct_act_inv,
-            &plaintext,
-            self.distribution_ip,
-            &mut encryption_generator
-        );
+    //     // proof for monomial
+    //     if masks_for_innerprod_act as usize != br_polydim {
+    //         cleartext[(br_polydim - masks_for_innerprod_act as usize) % br_polydim] = 0;
+    //         cleartext[(br_polydim - masks_for_innerprod_act as usize) % br_polydim] =
+    //             u64::wrapping_sub(0, self.ip_param.delta);
+    //     }
+    //     encrypt_glwe_ciphertext(
+    //         &self.glwe_sk_ip,
+    //         &mut ct_act_inv,
+    //         &plaintext,
+    //         self.distribution_ip,
+    //         &mut encryption_generator
+    //     );
 
-        vec![(ct_act, ct_act_inv)]
-    }
+    //     vec![(ct_act, ct_act_inv)]
+    // }
 
 
     pub fn decrypt_lwe(&self, lwe_ct: LweCiphertextOwned<u16>) -> u16 {
@@ -477,12 +491,156 @@ impl Client {
     =====================================================
 */
 
+pub struct MaliciousClient {
+    parameters: Arc<BfvParameters>,
+    secret_key: bfv::SecretKey,
+    database: BTreeMap<u128, RGSWCiphertext>,
+
+    inv_q0_mod_q1: u128,
+    inv_q1_mod_q0: u128,
+}
+
+impl MaliciousClient {
+    pub fn new() -> Result<Self> {
+        let (q0, q1) = (0x3fffffff000001_u64, 0x3fffffff004001_u64);
+        let parameters = bfv::BfvParametersBuilder::new()
+            .set_degree(4096)
+            .set_moduli(&[q0, q1])
+            .set_plaintext_modulus((1 << 19) + 21)
+            .build_arc()?;
+
+        let secret_key = bfv::SecretKey::random(&parameters, &mut OsRng);
+
+        Ok(Self {
+            parameters,
+            secret_key,
+            database: std::collections::BTreeMap::new(),
+            inv_q0_mod_q1: mod_inv(q0 as u128, q1 as u128),
+            inv_q1_mod_q0: mod_inv(q1 as u128, q0 as u128),
+        })
+    }
+
+    pub fn new_relin_keys(&self) -> Result<bfv::RelinearizationKey> {
+        bfv::RelinearizationKey::new(&self.secret_key, &mut thread_rng())
+    }
+
+    pub fn encrypt_rgsw_ciphertext(&self, features: &[f32], scale: f32) -> Result<(RGSWCiphertext, RGSWCiphertext, RGSWCiphertext)> {
+        let cleartext = self.encode(features, scale);
+        let plaintext = bfv::Plaintext::try_encode(&cleartext, bfv::Encoding::poly(), &self.parameters)?;
+        let mut rng = thread_rng();
+        let rgsw_ct: RGSWCiphertext = self.secret_key.try_encrypt(&plaintext, &mut rng)?;
+        let mut rgsw_masks = rgsw_ct.clone();
+        rgsw_masks.zeroize_body();
+
+        let mut rgsw_body = rgsw_ct.clone();
+        rgsw_body.zeroize_mask();
+
+        Ok((rgsw_ct, rgsw_masks, rgsw_body))
+    }
+
+    pub fn enroll_rgsw_masks(&mut self, id: u128, rgsw_masks: RGSWCiphertext) {
+        self.database.insert(id, rgsw_masks);
+    }
+
+    pub fn encrypt_rlwe_ciphertext(&self, features: &[f32], scale: f32) -> Result<(BfvCiphertext, u128)> {
+        let mut cleartext = self.encode(features, scale);
+        let norm = cleartext.iter().map(|&v| (v * v) as u128).sum::<u128>() % self.parameters.plaintext() as u128;
+
+        let poly_dim = features.len();
+        let n = self.parameters.degree() / poly_dim;
+        for i in 0..n {
+            cleartext[(poly_dim - 1 - i) * n + 1] = cleartext[i * n];
+        }
+        let plaintext = bfv::Plaintext::try_encode(&cleartext, bfv::Encoding::poly(), &self.parameters)?;
+        let mut rng = thread_rng();
+
+        let rlwe = self.secret_key.try_encrypt(&plaintext, &mut rng)?;
+        Ok((rlwe, norm))
+    }
+
+    // pub fn encrypt_new_lookup_tables(&self, d_packe: &BfvCiphertext) -> (BfvCiphertext, BfvCiphertext) {
+
+    // }
+
+    pub fn compute_mask_for_innerprod(&self, id: u128, rlwe: &BfvCiphertext) -> std::result::Result<u128, Box<dyn Error>> {
+        let rgsw = self.database.get(&id).ok_or(DatabaseError::KeyNotFound(id))?;
+        let rlwe_ip = rgsw * rlwe;
+        // println!("extern product: {:?}", rlwe_ip);
+        println!();
+        let pt = self.secret_key.try_decrypt(&rlwe_ip)?;
+        let mut poly = pt.to_poly();
+        poly.change_representation(PowerBasis);
+        let coeffs = poly.coefficients();
+        println!("len: {}", coeffs);
+
+        let q0 = self.parameters.moduli()[0] as u128;
+        let q1 = self.parameters.moduli()[1] as u128;
+        let v_q0 = coeffs[(0, 0)] as u128;
+        let v_q1 = coeffs[(1, 0)] as u128;
+        let m_0 = ((v_q0 * self.inv_q1_mod_q0) % q0) * q1;
+        let m_1 = ((v_q1 * self.inv_q0_mod_q1) % q1) * q0;
+
+        Ok((m_0 + m_1) % (q0 * q1))
+    }
+
+    pub fn compute_body_for_innerprod(&self, rgsw: &RGSWCiphertext, rlwe: &BfvCiphertext) -> std::result::Result<u128, Box<dyn Error>> {
+        let rlwe_ip = rgsw * rlwe;
+        // println!("extern product: {:?}", rlwe_ip);
+        println!();
+        let pt = self.secret_key.try_decrypt(&rlwe_ip)?;
+        let mut poly = pt.to_poly();
+        poly.change_representation(PowerBasis);
+        let coeffs = poly.coefficients();
+        println!("len: {}", coeffs);
+
+        let q0 = self.parameters.moduli()[0] as u128;
+        let q1 = self.parameters.moduli()[1] as u128;
+        let v_q0 = coeffs[(0, 0)] as u128;
+        let v_q1 = coeffs[(1, 0)] as u128;
+        let m_0 = ((v_q0 * self.inv_q1_mod_q0) % q0) * q1;
+        let m_1 = ((v_q1 * self.inv_q0_mod_q1) % q1) * q0;
+
+        Ok((m_0 + m_1) % (q0 * q1))
+    }
+
+    pub fn decrypt(&self, rlwe: &BfvCiphertext) -> Result<Vec<i64>> {
+        let pt = self.secret_key.try_decrypt(rlwe)?;
+        let mut poly = pt.to_poly();
+        poly.change_representation(PowerBasis);
+        let coeffs = poly.coefficients();
+        println!("len: {}", coeffs);
+
+        Vec::<i64>::try_decode(&pt, bfv::Encoding::poly())
+        // let q0 = self.parameters.moduli()[0] as u128;
+        // let q1 = self.parameters.moduli()[1] as u128;
+        // let v_q0 = coeffs[(0, 0)] as u128;
+        // let v_q1 = coeffs[(1, 0)] as u128;
+        // let m_0 = ((v_q0 * self.inv_q1_mod_q0) % q0) * q1;
+        // let m_1 = ((v_q1 * self.inv_q0_mod_q1) % q1) * q0;
+
+        // Ok((m_0 + m_1) % (q0 * q1))
+    }
+
+    fn encode(&self, features: &[f32], scale: f32) -> Vec<i64> {
+        let mut encoded = vec![0; self.parameters.degree()];
+        let n = self.parameters.degree() / features.len();
+        for (i, &fi) in features.iter().enumerate() {
+            encoded[i * n] = (fi * scale).round() as i64;
+        }
+        
+        encoded
+    }
+}
+
+
+
 /// Malicious Client
 /// The malicious client 
 pub struct MalClient {
     mal_param: GlweParameter<u128>,
 
     // key for encrypting templates and performing inner product
+
     rlwe_sk: GlweSecretKeyOwned<u128>,
     glwe_sk: GlweSecretKeyOwned<u128>,  // rearranged from rlwe_sk
     rlwe_sk_squared: GlweSecretKeyOwned<u128>,
@@ -497,7 +655,7 @@ pub struct MalClient {
     distribution: Gaussian<f64>,
     squared_indices: Vec<usize>,
 
-    threshold: usize,  // always assume threshold to be non-negative in the current implementations
+    // threshold: usize,  // always assume threshold to be non-negative in the current implementations
     precision: usize,
 
     // rlwe relin
@@ -548,7 +706,7 @@ impl MalClient {
             id_seeder: IdSeeder::new(((rng.next_u64() as u128) << 64) | (rng.next_u64() as u128)),
             noise_seeder: seeder,
             squared_indices: find_valid_squared_indices(N * n),
-            threshold: 0,
+            // threshold: 0,
             precision: ((N * n) as f32).log2().round() as usize - 2,  // log (Nn / 4),
             rlwe_dcp_log: DecompositionBaseLog(48),
             rlwe_dcp_count: DecompositionLevelCount(1),
@@ -1068,6 +1226,8 @@ impl MalClient {
         }
     }
 
+    /// fill the masks of ciphertexts with given id as a seed
+    /// the masks are modulo the ciphertext modulus, and the modulus reduction is only performed after encryption, which should not overflow u128
     fn fill_with_template_masks(&mut self, id: u128, glwe_ct_list: &mut GlweCiphertextListOwned<u128>) {
         let ciphertext_modulus = CiphertextModulus::new_native();
         let mut generator = RandomGenerator::<ActivatedRandomGenerator>::new(
@@ -1078,6 +1238,7 @@ impl MalClient {
             .iter_mut()
             .for_each(|mut ct| {
                 generator.fill_slice_with_random_uniform_custom_mod(ct.get_mut_mask().as_mut(), ciphertext_modulus);
+                ct.get_mut_mask().as_mut().iter_mut().for_each(|v| *v %= self.mal_param.ciphertext_modulus);
             });
     }
 
@@ -1107,5 +1268,7 @@ impl MalClient {
             &mask.as_polynomial_list(),
             &self.glwe_sk.as_polynomial_list(),
         );
+
+        body.as_mut().iter_mut().for_each(|v| *v %= self.mal_param.ciphertext_modulus);
     }
 }

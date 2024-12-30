@@ -1,7 +1,19 @@
+use std::borrow::BorrowMut;
 use std::collections::BTreeMap;
+use std::ops::AddAssign;
+use std::sync::Arc;
+use fhe_math::rq::traits::TryConvertFrom;
 use polynomial_algorithms::{polynomial_karatsuba_wrapping_mul, polynomial_wrapping_add_assign, polynomial_wrapping_add_mul_assign, polynomial_wrapping_mul};
 use tfhe::core_crypto::{commons::ciphertext_modulus::CiphertextModulusKind, prelude::*};
 use rand::{rngs::ThreadRng, thread_rng, Rng, RngCore};
+use fhe::bfv::{
+    self,
+    Ciphertext as BfvCiphertext,
+    BfvParameters,
+    RGSWCiphertext,
+};
+use fhe::Result;
+use fhe_math::rq::{Representation::PowerBasis, Representation, Poly, self};
 use crate::{params::*, rlwe::*, utils::*};
 
 pub struct Server {
@@ -146,6 +158,171 @@ impl Server {
         // TODO: add noise
 
         glwe_ct
+    }
+}
+
+pub struct AntiMalServer {
+    parameters: Arc<BfvParameters>,
+    ctx: Arc<rq::Context>,
+
+    database: BTreeMap<u128, RGSWCiphertext>,
+
+    relin_keys: bfv::RelinearizationKey,
+
+    inv_q0_mod_q1: u128,
+    inv_q1_mod_q0: u128,
+    delta_q0: u128,
+    delta_q1: u128,
+
+    rng: ThreadRng,
+}
+
+impl AntiMalServer {
+    pub fn new(relin_keys: bfv::RelinearizationKey) -> Result<Self> {
+        let (q0, q1) = (0x3fffffff000001_u64, 0x3fffffff004001_u64);
+        let parameters = bfv::BfvParametersBuilder::new()
+            .set_degree(4096)
+            .set_moduli(&[q0, q1])
+            .set_plaintext_modulus((1 << 19) + 21)
+            .build_arc()?;
+
+        // construct polynomials for multiplying
+
+        let ctx = rq::Context::new_arc(&[q0, q1], 4096)?;
+
+        let poly_packed_squared = Poly::zero(&ctx, PowerBasis);
+        let poly_act = Poly::zero(&ctx, PowerBasis);
+        let poly_act_squared = Poly::zero(&ctx, PowerBasis);
+        let poly_bin = Poly::zero(&ctx, PowerBasis);
+        let poly_bin_squared = Poly::zero(&ctx, PowerBasis);
+
+        let delta = q0 as u128 * q1 as u128 / parameters.plaintext() as u128;
+
+        Ok(Self {
+            parameters,
+            ctx,
+            database: std::collections::BTreeMap::new(),
+            relin_keys,
+            inv_q0_mod_q1: mod_inv(q0 as u128, q1 as u128),
+            inv_q1_mod_q0: mod_inv(q1 as u128, q0 as u128),
+            rng: thread_rng(),
+            delta_q0: delta % q0 as u128,
+            delta_q1: delta % q1 as u128,
+        })
+    }
+
+    pub fn enroll_rgsw(&mut self, id: u128, rgsw: RGSWCiphertext) {
+        self.database.insert(id, rgsw);
+    }
+
+    pub fn external_product(&self, id: u128, rlwe: &BfvCiphertext) -> std::result::Result<BfvCiphertext, DatabaseError> {
+        self.database.get(&id).and_then(|rgsw| Some(rgsw * rlwe)).ok_or(DatabaseError::KeyNotFound(id))
+    }
+
+    pub fn get_body_of_innerprod(&self, rlwe: &BfvCiphertext) -> u128 {
+        let mut poly = rlwe[0].clone();
+        println!("rlwe len: {}", rlwe.len());
+        poly.change_representation(PowerBasis);
+        let coeffs = poly.coefficients();
+        println!("len2: {}", coeffs);
+        let mut poly2 = rlwe[1].clone();
+        poly2.change_representation(PowerBasis);
+        let coeffs2 = poly2.coefficients();
+        println!("len2 mask: {}", coeffs2);
+
+        let q0 = self.parameters.moduli()[0] as u128;
+        let q1 = self.parameters.moduli()[1] as u128;
+        let v_q0 = coeffs[(0, 0)] as u128;
+        let v_q1 = coeffs[(1, 0)] as u128;
+        let m_0 = ((v_q0 * self.inv_q1_mod_q0) % q0) * q1;
+        let m_1 = ((v_q1 * self.inv_q0_mod_q1) % q1) * q0;
+
+        (m_0 + m_1) % (q0 * q1)
+    }
+
+    pub fn construct_constraints(
+        &mut self, 
+        id: u128, 
+        norm: u128,
+        d_packed: &BfvCiphertext, 
+        d_act: &BfvCiphertext, 
+        d_bin: &BfvCiphertext
+    ) -> std::result::Result<BfvCiphertext, Box<dyn std::error::Error>> {
+        let rgsw = self.database.get(&id).ok_or(DatabaseError::KeyNotFound(id))?;
+        let mut d_out = BfvCiphertext::new(vec![Poly::zero(&self.ctx, Representation::Ntt); 2], &self.parameters)?;
+
+        self.constraint_norm(&mut d_out, d_packed, norm);
+
+        Ok(d_out)
+    }
+
+    fn constraint_norm(&mut self, d_out: &mut BfvCiphertext, d_packed: &BfvCiphertext, norm: u128) -> Result<()> {
+        let feature_dim = 512_usize;
+        let n = self.parameters.degree() / feature_dim;
+        let poly_dim = self.parameters.degree();
+
+        // constraint 1 & 2: zero coeffs and dual coeffs
+        let mut poly_packed = Poly::zero(&self.ctx, PowerBasis);
+        let mut poly_packed_view_mut = poly_packed.coefficients_mut();
+
+        for i in 0..feature_dim {
+            let r = self.next_rand_ZZ_t_ast();
+
+            if i % n == 0 || (i + n - 1) % n == 0 {
+                // duals
+                let idx_lhs = (poly_dim - i) % poly_dim;
+                let idx_rhs = (poly_dim - ((feature_dim - 1) * n + 1 - i)) % poly_dim;
+                poly_packed_view_mut[(0, idx_lhs)] = r;
+                poly_packed_view_mut[(1, idx_lhs)] = r;
+
+                poly_packed_view_mut[(0, idx_rhs)] = self.parameters.plaintext() - r;
+                poly_packed_view_mut[(1, idx_rhs)] = self.parameters.plaintext() - r;
+            } else {
+                // zeros
+                poly_packed_view_mut[(0, poly_dim - i)] = r;
+                poly_packed_view_mut[(1, poly_dim - i)] = r;
+            }
+        }
+        poly_packed_view_mut[(0, 0)] = self.parameters.plaintext() - poly_packed_view_mut[(0, 0)];
+        poly_packed_view_mut[(1, 0)] = self.parameters.plaintext() - poly_packed_view_mut[(1, 0)];
+        poly_packed.change_representation(Representation::Ntt);
+
+        let mut d_packed_with_poly = d_packed.clone();
+        d_packed_with_poly[0] *= &poly_packed;
+        d_packed_with_poly[1] *= &poly_packed;
+
+        d_out.add_assign(&d_packed_with_poly);
+
+        // constraint 3, norm to be gamma
+        let mut poly_packed_squared = Poly::zero(&self.ctx, PowerBasis);
+        let r = self.next_rand_ZZ_t_ast();
+        poly_packed_squared.coefficients_mut()[(0, poly_dim - (feature_dim - 1) * n + 1)] = r;
+        poly_packed_squared.coefficients_mut()[(1, poly_dim - (feature_dim - 1) * n + 1)] = r;
+        poly_packed_squared.change_representation(Representation::Ntt);
+
+        let mut poly_packed_squared_offset = Poly::zero(&self.ctx, PowerBasis);
+        poly_packed_squared_offset.coefficients_mut()[(0, (feature_dim - 1) * n + 1)] = ((2 * norm * self.delta_q0) % self.parameters.moduli()[0] as u128) as u64;
+        poly_packed_squared_offset.coefficients_mut()[(1, (feature_dim - 1) * n + 1)] = ((2 * norm * self.delta_q0) % self.parameters.moduli()[0] as u128) as u64;
+        poly_packed_squared_offset.change_representation(Representation::Ntt);
+
+        let mut d_packed_squared = d_packed * d_packed;
+        d_packed_squared[0] -= &poly_packed_squared_offset;
+        d_packed_squared[0] *= &poly_packed_squared;
+        d_packed_squared[1] *= &poly_packed_squared;
+        d_packed_squared[2] *= &poly_packed_squared;
+        self.relin_keys.relinearizes(&mut d_packed_squared)?;
+
+        d_out.add_assign(&d_packed_squared);
+
+        Ok(())
+    }
+
+    fn next_rand_ZZ_t_ast(&mut self) -> u64 {
+        self.rng.gen_range(1..self.parameters.plaintext())
+    }
+
+    fn next_rand_ZZ_t_divided_2(&mut self) -> u64 {
+        self.rng.gen_range(0..self.parameters.plaintext()) & 0xFFFFFFFF_FFFFFFFE
     }
 }
 

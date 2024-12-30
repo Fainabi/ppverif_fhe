@@ -13,7 +13,8 @@ pub struct GlweParameter<Scalar> {
     pub delta: Scalar,
     pub decomposition_base_log: DecompositionBaseLog,
     pub decomposition_level_count: DecompositionLevelCount,
-    pub ciphertext_mask: Scalar
+    pub ciphertext_mask: Scalar,
+    pub ciphertext_modulus: u128,
 }
 
 pub const DEFAULT_INNER_PRODUCT_PARAMETER: GlweParameter<u64> = GlweParameter {
@@ -25,6 +26,7 @@ pub const DEFAULT_INNER_PRODUCT_PARAMETER: GlweParameter<u64> = GlweParameter {
     decomposition_base_log: DecompositionBaseLog(40),  // = 64 - 24
     decomposition_level_count: DecompositionLevelCount(1),
     ciphertext_mask: 0xFFFFFFFF_FFFFFFFF,
+    ciphertext_modulus: 1u128 << 64,
 };
 
 pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u16> = GlweParameter {
@@ -36,6 +38,7 @@ pub const DEFAULT_BLIND_ROTATION_PARAMETER: GlweParameter<u16> = GlweParameter {
     decomposition_base_log: DecompositionBaseLog(16),  // unused
     decomposition_level_count: DecompositionLevelCount(1),  // unused
     ciphertext_mask: 0xFFFF,
+    ciphertext_modulus: 1u128 << 16,
 };
 
 /// RLWE parameter, modulo (2 ** 96)
@@ -51,6 +54,7 @@ pub const DEFAULT_MALICIOUS_PARAMETER: GlweParameter<u128> = GlweParameter {
     decomposition_base_log: DecompositionBaseLog(32),
     decomposition_level_count: DecompositionLevelCount(2),
     ciphertext_mask: 0xFFFFFFFF_FFFFFFFF_FFFFFFFF,  // 2^96
+    ciphertext_modulus: (1u128 << 96),
 };
 
 pub type FourierGgswCiphertextOwned = FourierGgswCiphertext<ABox<[c64]>>;

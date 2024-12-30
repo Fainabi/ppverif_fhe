@@ -1,4 +1,5 @@
 use tfhe::core_crypto::prelude::*;
+use thiserror::Error;
 
 pub(crate) fn find_valid_squared_indices(poly_dim: usize) -> Vec<usize> {
     let mut indices = vec![];
@@ -32,4 +33,31 @@ where
         res = Scalar::wrapping_sub(res, Scalar::wrapping_mul(vi, vj));
     }
     res
+}
+
+pub(crate) fn mod_inv(v: u128, q: u128) -> u128 {
+    let mut phi_q_minus_1 = q - 2;
+    let mut res = 1u128;
+    let mut base = v;
+
+    while phi_q_minus_1 > 0 {
+        if phi_q_minus_1 & 1 == 1 {
+            res *= base;
+            res %= q;
+        }
+
+        base *= base;
+        base %= q;
+        phi_q_minus_1 >>= 1;
+    }
+
+    res
+}
+
+
+
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum DatabaseError {
+    #[error("Key {0} not found")]
+    KeyNotFound(u128),
 }
