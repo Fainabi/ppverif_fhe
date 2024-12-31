@@ -260,6 +260,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 [[package]]
 name = "fhe"
 version = "0.1.0-beta.8"
+source = "git+https://github.com/Fainabi/fhe.rs#84e777886e1b965cd1c396636a097df2b422f968"
 dependencies = [
  "doc-comment",
  "fhe-math",
@@ -281,6 +282,7 @@ dependencies = [
 [[package]]
 name = "fhe-math"
 version = "0.1.0-beta.8"
+source = "git+https://github.com/Fainabi/fhe.rs#84e777886e1b965cd1c396636a097df2b422f968"
 dependencies = [
  "concrete-ntt",
  "derivative",
@@ -307,6 +309,7 @@ dependencies = [
 [[package]]
 name = "fhe-traits"
 version = "0.1.0-beta.8"
+source = "git+https://github.com/Fainabi/fhe.rs#84e777886e1b965cd1c396636a097df2b422f968"
 dependencies = [
  "rand",
 ]
@@ -314,6 +317,7 @@ dependencies = [
 [[package]]
 name = "fhe-util"
 version = "0.1.0-beta.8"
+source = "git+https://github.com/Fainabi/fhe.rs#84e777886e1b965cd1c396636a097df2b422f968"
 dependencies = [
  "itertools 0.12.1",
  "num-bigint-dig",

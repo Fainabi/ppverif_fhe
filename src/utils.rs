@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use tfhe::core_crypto::prelude::*;
 use thiserror::Error;
 

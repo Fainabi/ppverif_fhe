@@ -1,8 +1,4 @@
-use aligned_vec::ABox;
-use concrete_fft::c64;
 use tfhe::core_crypto::prelude::*;
-
-
 
 #[derive(Debug, Copy, Clone)]
 pub struct GlweParameter<Scalar> {
@@ -56,5 +52,3 @@ pub const DEFAULT_MALICIOUS_PARAMETER: GlweParameter<u128> = GlweParameter {
     ciphertext_mask: 0xFFFFFFFF_FFFFFFFF_FFFFFFFF,  // 2^96
     ciphertext_modulus: (1u128 << 96),
 };
-
-pub type FourierGgswCiphertextOwned = FourierGgswCiphertext<ABox<[c64]>>;
