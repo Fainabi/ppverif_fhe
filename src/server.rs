@@ -515,29 +515,20 @@ impl AntiMalServer {
         }
         // correction flag
         // add b_delta % delta
-        // println!("b: {}", *c_ip.get_body().data & self.mal_param.ciphertext_mask);
         let delta = q0 as u128 * q1 as u128 / self.parameters.plaintext() as u128;
         let b_delta = self.get_body_of_innerprod(&d_ip) % delta;
         
         // correction flag, set a very loose boundary of Delta/4
-        #[cfg(feature = "debug")]
-        println!("b_delta: {}", b_delta);
-        if b_delta < delta / 4 {
+        if b_delta > delta * 3 / 4 {
             // u_plus
-            #[cfg(feature = "debug")]
-            println!("!!b_delta is small!!");
-
             let idx = self.squared_indices[rest_precision];
-            lut_bin.coefficients_mut()[(0, poly_dim - idx)] = self.parameters.plaintext() - 1;
-            lut_bin.coefficients_mut()[(1, poly_dim - idx)] = self.parameters.plaintext() - 1;
-        } else if b_delta > delta * 3 / 4 {
-            // u_minus
-            #[cfg(feature = "debug")]
-            println!("!!b_delta is large!!");
-
-            let idx = self.squared_indices[rest_precision + 1];
             lut_bin.coefficients_mut()[(0, poly_dim - idx)] = 1;
             lut_bin.coefficients_mut()[(1, poly_dim - idx)] = 1;
+        } else if b_delta < delta / 4 {
+            // u_minus
+            let idx = self.squared_indices[rest_precision + 1];
+            lut_bin.coefficients_mut()[(0, poly_dim - idx)] = self.parameters.plaintext() - 1;
+            lut_bin.coefficients_mut()[(1, poly_dim - idx)] = self.parameters.plaintext() - 1;
         }
         lut_bin.change_representation(Representation::Ntt);
         let mut d_bin = d_bin.clone();

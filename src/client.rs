@@ -535,10 +535,11 @@ impl MaliciousClient {
         #[cfg(feature = "debug")]
         println!("pt_act: {}, pt mask: {}, mask for ip: {}, delta: {}, rest noise: {}, neg noise: {}", masks_for_innerprod_act, pt_mask, mask_for_ip, delta, rest_noise, delta - rest_noise);
 
+        // rest_noise is a_sim % delta, in the paper it shows (-a_sim) % delta
         let (u_plus, u_minus) = if rest_noise < delta / 2 {
-            (1, 0)
-        } else {
             (0, 1)
+        } else {
+            (1, 0)
         };
         cleartext_bin[self.squared_indices[rest_precision]] = u_plus;
         cleartext_bin[self.squared_indices[rest_precision + 1]] = u_minus;
