@@ -6,11 +6,6 @@ edition = "2021"
 [dependencies]
 tfhe = { version = "0.6.4", features = ["boolean", "shortint", "integer", "x86_64"] }
 rand = "0.8.5"
-# rand_chacha = "0.3.1"
-concrete-fft = "0.4.1"
-# concrete-csprng = "0.4.1"
-# concrete-ntt = "0.2.0"
-aligned-vec = "0.5.0"
 fhe = { git = "https://github.com/Fainabi/fhe.rs" }
 fhe-traits = { git = "https://github.com/Fainabi/fhe.rs" }
 fhe-math = { git = "https://github.com/Fainabi/fhe.rs" }
@@ -30,3 +25,14 @@ path = "examples/malicious_demo.rs"
 [[example]]
 name = "bfv_demo"
 path = "examples/bfv_demo.rs"
+
+[dev-dependencies]
+criterion = { version = "0.5" }
+
+[[bench]]
+name = "semihonest"
+harness = false
+
+[[bench]]
+name = "malclient"
+harness = false

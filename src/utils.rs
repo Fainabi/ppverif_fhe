@@ -56,9 +56,13 @@ pub(crate) fn mod_inv(v: u128, q: u128) -> u128 {
     res
 }
 
+pub fn normalize(fs: &mut [f32]) {
+    let sqrt_norm: f32 = fs.iter().map(|&x| x * x).sum::<f32>().sqrt();
+    fs.iter_mut().for_each(|v| *v /= sqrt_norm);
+}
 
 
-#[derive(Error, Debug, PartialEq, Eq)]
+#[derive(Error, Debug)]
 pub enum DatabaseError {
     #[error("Key {0} not found")]
     KeyNotFound(u128),

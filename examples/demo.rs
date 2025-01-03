@@ -29,12 +29,12 @@ pub fn main() {
     println!("Generate lookup table: {} micros", elapsed.as_nanos() as f32 / 1000.0);
 
     let now = Instant::now();
-    let verif_ct = server.verify(0, query_ct, lut_ct).unwrap();
+    let verif_ct = server.verify(0, &query_ct, &lut_ct).unwrap();
     let elapsed = now.elapsed();
     println!("verification time: {} micros", elapsed.as_nanos() as f32 / 1000.0);
 
     let now = Instant::now();
-    let verif_res = client.decrypt_lwe(verif_ct);
+    let verif_res = client.decrypt_lwe(&verif_ct);
     let elapsed = now.elapsed();
     println!("decrytion time: {} micros", elapsed.as_nanos() as f32 / 1000.0);
 

@@ -45,7 +45,7 @@ impl Server {
         self.database.insert(id, template_bodies);
     }
 
-    pub fn verify(&mut self, id: u128, query_ct: GlweCiphertextOwned<u64>, lut_ct: GlweCiphertextListOwned<u16>) -> Option<LweCiphertextOwned<u16>> {
+    pub fn verify(&mut self, id: u128, query_ct: &GlweCiphertextOwned<u64>, lut_ct: &GlweCiphertextListOwned<u16>) -> Option<LweCiphertextOwned<u16>> {
         match self.compute_innerprod_body(id, query_ct.as_view()) {
             None => None,
             Some(innerprod_body) => {
@@ -192,6 +192,7 @@ pub struct AntiMalServer {
     squared_indices: Vec<usize>,
 
     rng: ThreadRng,
+    pub gamma: u128,
 }
 
 impl AntiMalServer {
@@ -223,6 +224,7 @@ impl AntiMalServer {
             squared_indices,
             delta_q0: delta % q0 as u128,
             delta_q1: delta % q1 as u128,
+            gamma: 512,
         })
     }
 
@@ -233,18 +235,19 @@ impl AntiMalServer {
     pub fn verify_with_constraint(
         &mut self, 
         id: u128, 
-        norm: u128, 
+        // norm: u128, 
         d_packed: &BfvCiphertext, 
         d_act: &BfvCiphertext, 
         d_bin: &BfvCiphertext
     ) -> std::result::Result<BfvCiphertext, Box<dyn std::error::Error>> {
         let rgsw = self.database.get(&id).ok_or(DatabaseError::KeyNotFound(id))?;
         let d_ip = rgsw * d_packed;
-        let d_cons = self.construct_constraints(norm, d_packed, d_act, d_bin, &d_ip)?;
+        let d_cons = self.construct_constraints(d_packed, d_act, d_bin, &d_ip)?;
         let mut d_verif = self.act_on_lookup_table(d_act, &d_ip);
 
         d_verif.add_assign(&d_cons);
         d_verif.add_assign(&self.new_mask_with_pk_and_pt_divided_2()?);
+        d_verif.mod_switch_to_last_level()?;
         Ok(d_verif)
     }
 
@@ -311,7 +314,6 @@ impl AntiMalServer {
 
     pub fn construct_constraints(
         &mut self, 
-        norm: u128,
         d_packed: &BfvCiphertext, 
         d_act: &BfvCiphertext, 
         d_bin: &BfvCiphertext, 
@@ -320,14 +322,14 @@ impl AntiMalServer {
         
         let mut d_out = BfvCiphertext::new(vec![Poly::zero(&self.ctx, Representation::Ntt); 2], &self.parameters)?;
 
-        self.constraint_norm(&mut d_out, d_packed, norm)?;
+        self.constraint_norm(&mut d_out, d_packed, d_bin)?;
         self.constraint_monomial(&mut d_out, d_act, d_bin)?;
         self.constarint_index(&mut d_out, d_act, d_bin, &d_ip)?;
 
         Ok(d_out)
     }
 
-    fn constraint_norm(&mut self, d_out: &mut BfvCiphertext, d_packed: &BfvCiphertext, norm: u128) -> Result<()> {
+    fn constraint_norm(&mut self, d_out: &mut BfvCiphertext, d_packed: &BfvCiphertext, d_bin: &BfvCiphertext) -> Result<()> {
         let feature_dim = 512_usize;
         let n = self.parameters.degree() / feature_dim;
         let poly_dim = self.parameters.degree();
@@ -339,16 +341,16 @@ impl AntiMalServer {
         for i in 0..poly_dim {
             let r = self.next_rand_zz_t_ast();
 
-            if i % n == 0 || (i + n - 1) % n == 0 {
+            if i % n == 0 {
                 // duals
                 let idx_lhs = (poly_dim - i) % poly_dim;
-                let idx_rhs = (poly_dim - ((feature_dim - 1) * n + 1 - i)) % poly_dim;
+                let idx_rhs = poly_dim - ((feature_dim - 1) * n + 1 - i);
                 poly_packed_view_mut[(0, idx_lhs)] = r;
                 poly_packed_view_mut[(1, idx_lhs)] = r;
 
                 poly_packed_view_mut[(0, idx_rhs)] = self.parameters.plaintext() - r;
                 poly_packed_view_mut[(1, idx_rhs)] = self.parameters.plaintext() - r;
-            } else {
+            } else if i % n != 1 {
                 // zeros
                 poly_packed_view_mut[(0, poly_dim - i)] = r;
                 poly_packed_view_mut[(1, poly_dim - i)] = r;
@@ -367,17 +369,39 @@ impl AntiMalServer {
         // constraint 3, norm to be gamma
         let mut poly_packed_squared = Poly::zero(&self.ctx, PowerBasis);
         let r = self.next_rand_zz_t_ast();
-        poly_packed_squared.coefficients_mut()[(0, poly_dim - (feature_dim - 1) * n + 1)] = r;
-        poly_packed_squared.coefficients_mut()[(1, poly_dim - (feature_dim - 1) * n + 1)] = r;
+        poly_packed_squared.coefficients_mut()[(0, poly_dim - (feature_dim - 1) * n - 1)] = r;
+        poly_packed_squared.coefficients_mut()[(1, poly_dim - (feature_dim - 1) * n - 1)] = r;
         poly_packed_squared.change_representation(Representation::Ntt);
+
+        let sqrt_n = (self.parameters.degree() as f64).sqrt().round() as u128;
+        let bound = self.gamma * sqrt_n + self.parameters.degree() as u128 / 4;
+        let gamma_squared = self.gamma * self.gamma;
+        let num_bits = (bound as f64).log2().ceil() as usize + 1;
+        let norm = (self.parameters.plaintext() as u128 + bound - gamma_squared) % self.parameters.plaintext() as u128;
 
         let mut poly_packed_squared_offset = Poly::zero(&self.ctx, PowerBasis);
         poly_packed_squared_offset.coefficients_mut()[(0, (feature_dim - 1) * n + 1)] = ((2 * norm * self.delta_q0) % self.parameters.moduli()[0] as u128) as u64;
         poly_packed_squared_offset.coefficients_mut()[(1, (feature_dim - 1) * n + 1)] = ((2 * norm * self.delta_q1) % self.parameters.moduli()[1] as u128) as u64;
         poly_packed_squared_offset.change_representation(Representation::Ntt);
 
+        let mut poly_bin = Poly::zero(&self.ctx, PowerBasis);
+        let plaintext_precision = (self.parameters.plaintext() as f32).log2().round() as usize + 1;  // CAUTION, ceiling thus modulus should not be power-of-two
+        let precision = ((self.parameters.degree() / 4) as f32).log2().round() as usize;
+        let rest_precision = plaintext_precision - precision;
+        for i in 0..num_bits {
+            let idx = self.squared_indices[rest_precision + 2 + i];
+            poly_bin.coefficients_mut()[(0, (feature_dim - 1) * n + 1 - idx)] = (2u64 << i) % self.parameters.moduli()[0];
+            poly_bin.coefficients_mut()[(1, (feature_dim - 1) * n + 1 - idx)] = (2u64 << i) % self.parameters.moduli()[1];
+        }
+        poly_bin.change_representation(Representation::Ntt);
+        let mut d_bin = d_bin.clone();
+        d_bin[0] *= &poly_bin;
+        d_bin[1] *= &poly_bin;
+
         let mut d_packed_squared = d_packed * d_packed;
-        d_packed_squared[0] -= &poly_packed_squared_offset;
+        d_packed_squared[0] += &poly_packed_squared_offset;
+        d_packed_squared[0] -= &d_bin[0];
+        d_packed_squared[1] -= &d_bin[1];
         d_packed_squared[0] *= &poly_packed_squared;
         d_packed_squared[1] *= &poly_packed_squared;
         d_packed_squared[2] *= &poly_packed_squared;
@@ -443,6 +467,10 @@ impl AntiMalServer {
         d_out.add_assign(&d_act_squared);
 
         // constraint 5 & 6
+        let sqrt_n = (self.parameters.degree() as f64).sqrt().round() as u128;
+        let bound = self.gamma * sqrt_n + self.parameters.degree() as u128 / 4;
+        let num_bits = (bound as f64).log2().ceil() as usize + 1;
+
         let precision = ((self.parameters.degree() / 4) as f32).log2().round() as usize;
         let plaintext_precision = (self.parameters.plaintext() as f32).log2().round() as usize + 1;  // CAUTION, ceiling thus modulus should not be power-of-two
         let rest_precision = plaintext_precision - precision;
@@ -454,7 +482,7 @@ impl AntiMalServer {
         }
 
         let mut poly_bin_squared = Poly::zero(&self.ctx, Representation::PowerBasis);
-        for i in 0..rest_precision+2 {
+        for i in 0..rest_precision+2+num_bits {
             let idx = self.squared_indices[i];
             poly_bin_squared.coefficients_mut()[(0, (poly_dim - 2 * idx) % poly_dim)] = self.parameters.plaintext() - poly_bin.coefficients()[(0, (poly_dim - idx) % poly_dim)];
             poly_bin_squared.coefficients_mut()[(1, (poly_dim - 2 * idx) % poly_dim)] = self.parameters.plaintext() - poly_bin.coefficients()[(1, (poly_dim - idx) % poly_dim)];
@@ -561,7 +589,8 @@ impl AntiMalServer {
     fn new_mask_with_pk_and_pt_divided_2(&mut self) -> Result<BfvCiphertext> {        
         let cleartext = (0..self.parameters.degree()).map(|i| {
             if i == 0 {
-                self.next_rand_zz_t() & 0xFFFFFFFF_FFFFFFFE
+                // self.next_rand_zz_t() & 0xFFFFFFFF_FFFFFFFE
+                0
             } else {
                 self.next_rand_zz_t()
             }

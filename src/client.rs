@@ -16,7 +16,6 @@ use crate::seeder::IdSeeder;
 
 
 pub struct Client {
-    // TODO: store decrypted masks
     // parameters
     ip_param: GlweParameter<u64>,
     br_param: GlweParameter<u16>,
@@ -345,8 +344,8 @@ impl Client {
         Some(cts)
     }
 
-    pub fn decrypt_lwe(&self, lwe_ct: LweCiphertextOwned<u16>) -> u16 {
-        let pt = decrypt_lwe_ciphertext(&self.glwe_sk_br.as_lwe_secret_key(), &lwe_ct);
+    pub fn decrypt_lwe(&self, lwe_ct: &LweCiphertextOwned<u16>) -> u16 {
+        let pt = decrypt_lwe_ciphertext(&self.glwe_sk_br.as_lwe_secret_key(), lwe_ct);
 
         // either 0 or 1
         (pt.0 as f32 / self.br_param.delta as f32).round() as u16
@@ -579,17 +578,21 @@ impl MaliciousClient {
 
         let poly_dim = features.len();
         let n = self.parameters.degree() / poly_dim;
-        for i in 0..n {
+        for i in 0..poly_dim {
             cleartext[(poly_dim - 1 - i) * n + 1] = cleartext[i * n];
         }
         let plaintext = bfv::Plaintext::try_encode(&cleartext, bfv::Encoding::poly(), &self.parameters)?;
-        let mut rng = thread_rng();
+        // let polypoly = Polynomial::from_container(cleartext.into_iter().map(|v| v as u64).collect::<Vec<_>>());
+        // let mut poly2 = polypoly.clone();
+        // polynomial_wrapping_mul(&mut poly2, &polypoly, &polypoly);
+        // println!("{:?}, norm: {}", poly2.as_ref()[(poly_dim - 1) * n + 1], norm);
 
+        let mut rng = thread_rng();
         let rlwe = self.secret_key.try_encrypt(&plaintext, &mut rng)?;
         Ok((rlwe, norm))
     }
 
-    pub fn encrypt_new_lookup_tables(&self, id: u128, d_packed: &BfvCiphertext) -> std::result::Result<(BfvCiphertext, BfvCiphertext), Box<dyn Error>> {        
+    pub fn encrypt_new_lookup_tables(&self, id: u128, gamma: u128, norm: u128, d_packed: &BfvCiphertext) -> std::result::Result<(BfvCiphertext, BfvCiphertext), Box<dyn Error>> {        
         let q0 = self.parameters.moduli()[0] as u128;
         let q1 = self.parameters.moduli()[1] as u128;
         let ciphertext_modulus = q0 * q1;
@@ -644,11 +647,24 @@ impl MaliciousClient {
         cleartext_bin[self.squared_indices[rest_precision]] = u_plus;
         cleartext_bin[self.squared_indices[rest_precision + 1]] = u_minus;
 
+        // norm
+        let sqrt_n = (self.parameters.degree() as f64).sqrt().round() as u128;
+        let bound = gamma * sqrt_n + self.parameters.degree() as u128 / 4;
+        let gamma_squared = gamma * gamma;
+        let diff = (norm + bound - gamma_squared) % self.parameters.plaintext() as u128;
+        let num_bits = (bound as f64).log2().ceil() as usize + 1;
+        for i in 0..num_bits {
+            cleartext_bin[self.squared_indices[rest_precision + 2 + i]] = ((diff >> i) & 0x1) as u64;
+        }
+
+        #[cfg(feature = "debug")]
+        println!("diff: {}, norm: {}, bound: {}, val to pass: {}, 1 << numbits: {}", diff - bound, norm, bound, diff, 1 << num_bits);
+
         let pt_bin = bfv::Plaintext::try_encode(&cleartext_bin, bfv::Encoding::poly(), &self.parameters)?;
         let d_bin = self.secret_key.try_encrypt(&pt_bin, &mut rng)?;
 
         // println!("act mask: {}, rest mask: {}, plaintext: {}", masks_for_innerprod_act, rest_mask, masks_plaintext);
-
+        
         Ok((d_act, d_bin))
     }
 
