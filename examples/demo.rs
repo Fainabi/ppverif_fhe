@@ -15,6 +15,7 @@ pub fn main() {
     // enrollment
     let template = client.encrypt_new_template(0, &f1, 512.0);
     server.enroll(0, template);
+    client.enroll_ggsw_masks(0);
 
     // verification
     let now = Instant::now();
@@ -23,7 +24,7 @@ pub fn main() {
     println!("Encrypting query ct {} micros", elapsed.as_nanos() as f32 / 1000.0);
 
     let now = Instant::now();
-    let lut_ct = client.transform_mask(0, query_ct.as_view());
+    let lut_ct = client.transform_mask_from_database(0, query_ct.as_view()).unwrap();
     let elapsed = now.elapsed();
     println!("Generate lookup table: {} micros", elapsed.as_nanos() as f32 / 1000.0);
 
