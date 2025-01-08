@@ -33,14 +33,25 @@ fn malicious_benchmark(c: &mut Criterion) -> std::result::Result<(), Box<dyn Err
     });
 
     let (d_packed, norm) = client.encrypt_rlwe_ciphertext(&features_to_verif, 512.0).unwrap();
+    c.bench_function("client calculate inner prod", |b| b.iter(|| {
+        client.compute_mask_for_innerprod(0, &d_packed).unwrap();
+    }));
+
+    // this includes the former one
     c.bench_function("Construct Constraints", |b| {
         b.iter(|| {
             client.encrypt_new_lookup_tables(0, 512, norm, &d_packed).unwrap();
         });
     });
 
-
     let (d_act, d_bin) = client.encrypt_new_lookup_tables(0, 512, norm, &d_packed).unwrap();
+
+    c.bench_function("server calculate inner prod", |b| b.iter(|| {
+        server.external_product(0, &d_packed).unwrap();
+    }));
+    c.bench_function("remask", |b| b.iter(|| {
+        server.new_mask_with_pk_and_pt_divided_2().unwrap();
+    }));
     c.bench_function("Mal Verification", |b| {
         b.iter(|| {
             server.verify_with_constraint(0, &d_packed, &d_act, &d_bin).unwrap();

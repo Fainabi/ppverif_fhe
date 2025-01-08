@@ -71,7 +71,7 @@ impl Server {
         }
     }   
 
-    fn compute_innerprod_body(&mut self, id: u128, query_ct: GlweCiphertextView<u64>) -> Option<u64> {
+    pub fn compute_innerprod_body(&mut self, id: u128, query_ct: GlweCiphertextView<u64>) -> Option<u64> {
          match self.database.get(&id) {
             None => None,
             Some(template_ggsw_bodies) => {
@@ -586,11 +586,11 @@ impl AntiMalServer {
         Ok(())
     }
 
-    fn new_mask_with_pk_and_pt_divided_2(&mut self) -> Result<BfvCiphertext> {        
+    pub fn new_mask_with_pk_and_pt_divided_2(&mut self) -> Result<BfvCiphertext> {        
         let cleartext = (0..self.parameters.degree()).map(|i| {
             if i == 0 {
-                // self.next_rand_zz_t() & 0xFFFFFFFF_FFFFFFFE
-                0
+                self.next_rand_zz_t() & 0xFFFFFFFF_FFFFFFFE
+                // 0
             } else {
                 self.next_rand_zz_t()
             }

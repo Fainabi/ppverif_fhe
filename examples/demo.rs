@@ -18,6 +18,7 @@ pub fn main() {
     client.enroll_ggsw_masks(0);
 
     // verification
+    // Client
     let now = Instant::now();
     let query_ct = client.encrypt_glwe(&f2, 512.0);
     let elapsed = now.elapsed();
@@ -28,11 +29,13 @@ pub fn main() {
     let elapsed = now.elapsed();
     println!("Generate lookup table: {} micros", elapsed.as_nanos() as f32 / 1000.0);
 
+    // Server
     let now = Instant::now();
     let verif_ct = server.verify(0, &query_ct, &lut_ct).unwrap();
     let elapsed = now.elapsed();
     println!("verification time: {} micros", elapsed.as_nanos() as f32 / 1000.0);
 
+    // Client
     let now = Instant::now();
     let verif_res = client.decrypt_lwe(&verif_ct);
     let elapsed = now.elapsed();

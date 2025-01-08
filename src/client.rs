@@ -405,7 +405,7 @@ impl Client {
         masks_for_innerprod
     }
 
-    fn transform_mask_to_body_from_database(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> Option<u64> {
+    pub fn transform_mask_to_body_from_database(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> Option<u64> {
         match self.database.get(&id) {
             None => None,
             Some(dec_masks)  => {

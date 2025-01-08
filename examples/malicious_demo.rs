@@ -23,15 +23,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // enrollment
     let (rgsw, rgsw_masks) = malclient.encrypt_rgsw_ciphertext(&features1, 512.0)?;
     malclient.enroll_rgsw_masks(0, rgsw_masks);
-    malserver.enroll_rgsw(0, rgsw.clone());
+    malserver.enroll_rgsw(0, rgsw);
 
     // encrypt
     let now = Instant::now();
     let (d_packed, norm) = malclient.encrypt_rlwe_ciphertext(&features2, 512.0)?;
+    let elapsed = now.elapsed();
+    println!("encryption d_packed time: {} millis", elapsed.as_micros() as f32 / 1000.0);
+    
+    let now = Instant::now();
     let (d_act, d_bin) = malclient.encrypt_new_lookup_tables(0, 512, norm, &d_packed)?;
     let elapsed = now.elapsed();
-    println!("encryption time: {} millis", elapsed.as_micros() as f32 / 1000.0);
-
+    println!("construct two cts time: {} millis", elapsed.as_micros() as f32 / 1000.0);
+    
     // verification
     let now = Instant::now();
     let d_cons = malserver.verify_with_constraint(0, &d_packed, &d_act, &d_bin)?;
