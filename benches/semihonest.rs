@@ -3,12 +3,21 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use ppverif_fhe::*;
 use rand::{thread_rng, RngCore};
 use tfhe::core_crypto::prelude::*;
+use fhe::bfv;
 
 
-fn pk_enc_benchmark(c: &mut Criterion) {
-    let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER);
+fn pk_enc_benchmark(c: &mut Criterion) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let parameters = bfv::BfvParametersBuilder::new()
+        .set_degree(4096)
+        .set_moduli(&[0x3fffffff000001_u64, 0x3fffffff004001_u64])
+        .set_plaintext_modulus((1 << 19) + 21)
+        .build_arc()?;
+
+
+    let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, parameters.clone());
     let glwe_pk = client.new_glwe_public_keys_br();
-    let mut server= Server::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, glwe_pk);
+    let bfv_rlk = client.new_bfv_relinearizatio_key()?;
+    let mut server= Server::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, parameters, glwe_pk, bfv_rlk)?;
 
     let mut rng = thread_rng();
     let mut features_to_verif = (0..DEFAULT_INNER_PRODUCT_PARAMETER.polynomial_size.0)
@@ -71,6 +80,8 @@ fn pk_enc_benchmark(c: &mut Criterion) {
             client.decrypt_lwe(&ct_verif);
         });
     });
+
+    Ok(())
 }
 
 criterion_group!(benches, pk_enc_benchmark);

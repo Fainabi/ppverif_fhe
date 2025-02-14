@@ -1,10 +1,19 @@
 use ppverif_fhe::*;
 use std::time::Instant;
+use fhe::bfv;
 
-pub fn main() {
-    let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER);
+pub fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let parameters = bfv::BfvParametersBuilder::new()
+        .set_degree(4096)
+        .set_moduli(&[0x3fffffff000001_u64, 0x3fffffff004001_u64, 0x3fffffff04e001, 0x3fffffff058001, 0x3fffffff07c001])
+        .set_plaintext_modulus(0x88001)
+        .build_arc()?;
+
+
+    let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, parameters.clone());
     let pk = client.new_glwe_public_keys_br();
-    let mut server = Server::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, pk);
+    let bfv_rlk = client.new_bfv_relinearizatio_key()?;
+    let mut server = Server::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, parameters, pk, bfv_rlk)?;
 
     // features
     let mut f1 = vec![0f32; 512];
@@ -42,4 +51,6 @@ pub fn main() {
     println!("decrytion time: {} micros", elapsed.as_nanos() as f32 / 1000.0);
 
     println!("verif res: {}", verif_res);
+
+    Ok(())
 }

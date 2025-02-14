@@ -22,6 +22,10 @@ path = "examples/demo.rs"
 name = "mal_demo"
 path = "examples/malicious_demo.rs"
 
+[[example]]
+name = "accdemo"
+path = "examples/accdemo.rs"
+
 [dev-dependencies]
 criterion = { version = "0.5" }
 

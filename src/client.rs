@@ -5,7 +5,7 @@ use rand::{rngs::OsRng, *};
 use tfhe::core_crypto::prelude::*;
 use tfhe::core_crypto::commons::math::random::*;
 use tfhe::core_crypto::algorithms::polynomial_algorithms::*;
-use fhe::bfv::{ self, Ciphertext as BfvCiphertext, BfvParameters, RGSWCiphertext};
+use fhe::bfv::{ self, BfvParameters, BfvParametersBuilder, Ciphertext as BfvCiphertext, RGSWCiphertext};
 use fhe::Result;
 use fhe_math::rq::Representation::PowerBasis;
 use fhe_traits::*;
@@ -19,12 +19,16 @@ pub struct Client {
     // parameters
     ip_param: GlweParameter<u64>,
     br_param: GlweParameter<u16>,
+    bfv_param: Arc<BfvParameters>,
 
     // key for encrypting templates and performing inner product
     glwe_sk_ip: GlweSecretKeyOwned<u64>,
     
     // key for blind rotation
     glwe_sk_br: GlweSecretKeyOwned<u16>,
+
+    // key for identification
+    bfv_sk: bfv::SecretKey,
 
     // global seed for masking templates
     id_seeder: IdSeeder,
@@ -45,7 +49,7 @@ pub struct Client {
 impl Client {
     /// Instantiate a new client with a default `thread_rng`.
     /// `ip_param` is for inner product, and `br_param` is for blind rotation
-    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u16>) -> Self {
+    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u16>, bfv_param: Arc<BfvParameters>) -> Self {
         let mut seeder = new_seeder();
         
         let mut secret_generator =
@@ -63,13 +67,17 @@ impl Client {
             &mut secret_generator,
         );
 
+        let bfv_sk = bfv::SecretKey::random(&bfv_param, &mut OsRng);
+
         let mut rng = thread_rng();
 
         Self {
             ip_param,
             br_param,
+            bfv_param,
             glwe_sk_ip,
             glwe_sk_br,
+            bfv_sk,
             distribution_ip: Gaussian::from_dispersion_parameter(StandardDev(ip_param.std_dev), 0.0),
             distribution_br: Gaussian::from_dispersion_parameter(StandardDev(br_param.std_dev), 0.0),
             id_seeder: IdSeeder::new(((rng.next_u64() as u128) << 64) | (rng.next_u64() as u128)),
@@ -109,6 +117,10 @@ impl Client {
                 ct
             })
             .collect()
+    }
+
+    pub fn new_bfv_relinearizatio_key(&self) -> Result<bfv::RelinearizationKey> {
+        bfv::RelinearizationKey::new(&self.bfv_sk, &mut thread_rng())
     }
 
     pub fn set_threshold(&mut self, threshold: f32) {
@@ -349,6 +361,35 @@ impl Client {
 
         // either 0 or 1
         (pt.0 as f32 / self.br_param.delta as f32).round() as u16
+    }
+
+    /// For calculated masked inner products, encrypt the bits of these values slot-wisely.
+    /// Each row of the ciphertext is the grouped ciphertexts,
+    /// each column is the encrypted digits for the values
+    pub fn encrypt_rlwe_for_binary_decomposition(&self, vals: &[u64]) -> Result<Vec<Vec<BfvCiphertext>>> {
+        let mut rng = thread_rng();
+
+        let n = vals.len();
+        let poly_deg = self.bfv_param.degree();
+        let group_num = n / poly_deg + if n % poly_deg == 0 { 0 } else { 1 };
+        let mut ct_group = vec![];
+
+        for g_idx in 0..group_num {
+            let idx_bg = g_idx * poly_deg;
+            let idx_ed = ((g_idx + 1) * poly_deg).min(n);
+            let mut cts = vec![];
+
+            for i in 0..self.precision {
+                let digits: Vec<_> = vals[idx_bg..idx_ed].iter().map(|&v| (v >> (63 - i)) & 0x1).collect();
+                
+                let pt = bfv::Plaintext::try_encode(&digits, bfv::Encoding::simd(), &self.bfv_param)?;
+                let ct = self.bfv_sk.try_encrypt(&pt, &mut rng)?;
+                cts.push(ct);
+            }
+            ct_group.push(cts);
+        }
+
+        Ok(ct_group)
     }
 
     /// Transform the template mask to decrypted body

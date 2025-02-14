@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("{:?}", parameters);
 
     let mut rng = thread_rng();
-
+    
     let secret_key = SecretKey::random(&parameters, &mut OsRng);
     let public_key = PublicKey::new(&secret_key, &mut rng);
     let relin_keys = RelinearizationKey::new(&secret_key, &mut rng)?;

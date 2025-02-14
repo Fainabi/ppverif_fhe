@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::ops::AddAssign;
 use std::sync::Arc;
+use std::vec;
 use rand::{rngs::ThreadRng, thread_rng, Rng, RngCore};
 use polynomial_algorithms::polynomial_wrapping_add_mul_assign;
 use tfhe::core_crypto::commons::math::random::RandomGenerator;
@@ -14,6 +15,12 @@ use crate::{params::*, utils::*};
 pub struct Server {
     ip_param: GlweParameter<u64>,
     br_param: GlweParameter<u16>,
+    bfv_param: Arc<BfvParameters>,
+
+    ctx: Arc<rq::Context>,
+    poly_zero: rq::Poly,
+    poly_one: rq::Poly,
+    bfv_rlk: bfv::RelinearizationKey,
 
     // any data structure
     database: BTreeMap<u128, Vec<GlweBody<Vec<u64>>>>,
@@ -28,17 +35,35 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u16>, glwe_pk: Vec<GlweCiphertextOwned<u16>>) -> Self {
+    pub fn new(
+        ip_param: GlweParameter<u64>, 
+        br_param: GlweParameter<u16>, 
+        bfv_param: Arc<BfvParameters>, 
+        glwe_pk: Vec<GlweCiphertextOwned<u16>>, 
+        bfv_rlk: bfv::RelinearizationKey,
+    ) -> Result<Self> {
         let noise_distribution = Gaussian::from_standard_dev(StandardDev(br_param.std_dev), 0.0);
-        Self {
+        let ctx = rq::Context::new_arc(bfv_param.moduli(), bfv_param.degree())?;
+        let poly_zero = Poly::zero(&ctx, Representation::Ntt);
+        let mut vec_one = vec![0u64; bfv_param.degree()];
+        vec_one[0] = 1;
+
+        let poly_one = bfv::Plaintext::try_encode(&vec_one, bfv::Encoding::simd(), &bfv_param)?.to_poly();
+
+        Ok(Self {
             ip_param,
             br_param,
+            bfv_param,
+            poly_zero,
+            poly_one,
+            ctx,
+            bfv_rlk,
             database: BTreeMap::new(),
             glwe_pk,
             noise_distribution,
             noise_seeder: new_seeder(),
             precision: 8,
-        }
+        })
     }
 
     pub fn enroll(&mut self, id: u128, template_bodies: Vec<GlweBody<Vec<u64>>>) {
@@ -119,6 +144,119 @@ impl Server {
             }
         }
 
+    }
+
+    pub fn batch_fold(&self, cts: Vec<Vec<BfvCiphertext>>, ips: Vec<u64>) -> Result<Vec<Vec<BfvCiphertext>>> {
+        let n = ips.len();
+        let poly_deg = self.bfv_param.degree();
+
+        let mut ct_group = vec![];
+        for (g_idx, ct) in cts.iter().enumerate() {
+            let idx_bg = g_idx * poly_deg;
+            let idx_ed = ((g_idx + 1) * poly_deg).min(n);
+
+            // construct digits first
+            let mut digit_polys = vec![];
+            for i in 0..self.precision {
+                let digits = ips[idx_bg..idx_ed]
+                    .iter()
+                    .map(|&v| (v >> (63 - i)) & 0x1)
+                    .collect::<Vec<_>>();
+                
+                let poly = bfv::Plaintext::try_encode(&digits, bfv::Encoding::simd(), &self.bfv_param)?;
+                // poly.to_poly()
+                // let poly = rq::Poly::zero(&self.ctx, Representation::Ntt);
+                
+                digit_polys.push(poly.to_poly());
+            }
+
+            // now fold the packed ciphertexts and digits for determine sign of (ct + ip)
+            // Layout:
+            //     cts: [ ct_0^{(0)} ct_0^{(1)} ... ct_0^{7};
+            //            ct_1^{(0)} ct_1^{(1)} ... ct_1^{7};
+            //            ct_2^{(0)} ct_2^{(1)} ... ct_2^{7};
+            //                            ... ]
+            //    poly: [ w_0^{(0)} w_0^{(1)} ... w_0^{7};
+            //            w_1^{(0)} w_1^{(1)} ... w_1^{7};
+            //            w_2^{(0)} w_2^{(1)} ... w_2^{7};
+            //                            ... ]
+            let mut ct_ans = vec![];
+            for (i, (ct_i, w_i)) in ct.iter().zip(digit_polys.iter()).enumerate() {
+                
+                let mut acc_i = ct_i.clone();
+                let neg_double_w = - (w_i + w_i);
+
+                // 2 * w * c
+                acc_i[0] *= &neg_double_w;
+                acc_i[1] *= &neg_double_w;
+
+                // c - 2 * w * c
+                acc_i += ct_i;
+
+                // (w, 0) + c - 2 * w * c
+                acc_i[0] += w_i;
+
+                let acc_i = if i + 1 == self.precision {
+                    let mut neg_double_acci = -acc_i.clone();
+                    neg_double_acci += &-acc_i;
+                    neg_double_acci[0] += &self.poly_one;
+                    neg_double_acci
+                } else {
+                    acc_i
+                };
+
+                ct_ans.push(acc_i);
+            }
+
+            self.fold_mul(&mut ct_ans)?;
+            ct_group.push(ct_ans);
+        }
+
+        Ok(ct_group)
+    }
+
+    pub fn fold_mul(&self, cts: &mut [BfvCiphertext]) -> Result<()> {
+        if cts.len() <= 1 {
+            return Ok(());
+        }
+
+        let len = cts.len();
+        let nearest_pow2 = {
+            let mut cnt = 0;
+            let mut len = len;
+            while len > 1 {
+                len >>= 1;
+                cnt += 1;
+            }
+
+            1usize << cnt
+        };
+
+        if nearest_pow2 != len {
+            self.fold_mul(&mut cts[..len-nearest_pow2])?;
+            self.fold_mul(&mut cts[len-nearest_pow2..])?;
+
+            for i in len-nearest_pow2..len {
+                cts[i] = &cts[i] * &cts[len-nearest_pow2-1];
+                self.bfv_rlk.relinearizes(&mut cts[i])?;
+            }
+        } else {            
+            let mid = nearest_pow2 / 2;
+            self.fold_mul(&mut cts[len-mid..])?;
+            self.fold_mul(&mut cts[..len-mid])?;
+
+            // then reduce
+            for i in len-mid..len {
+                cts[i] = &cts[i] * &cts[len-mid-1];
+                self.bfv_rlk.relinearizes(&mut cts[i])?;
+            }
+        }
+
+        // for ct in cts.iter_mut() {
+        //     ct.mod_switch_to_next_level()?;
+        // }
+
+        Ok(())
     }
 
     fn new_zero_encryption(&mut self) -> GlweCiphertextOwned<u16> {
