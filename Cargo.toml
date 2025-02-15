@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 tfhe = { version = "0.6.4", features = ["boolean", "shortint", "integer", "x86_64"] }
+concrete-ntt = "0.1.2"
 rand = "0.8.5"
 fhe = { path = "../fhe.rs/crates/fhe" }
 fhe-traits = { path = "../fhe.rs/crates/fhe-traits" }

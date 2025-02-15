@@ -14,7 +14,7 @@ fn pk_enc_benchmark(c: &mut Criterion) -> std::result::Result<(), Box<dyn std::e
         .build_arc()?;
 
 
-    let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, parameters.clone());
+    let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, parameters.clone())?;
     let glwe_pk = client.new_glwe_public_keys_br();
     let bfv_rlk = client.new_bfv_relinearizatio_key()?;
     let mut server= Server::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, parameters, glwe_pk, bfv_rlk)?;

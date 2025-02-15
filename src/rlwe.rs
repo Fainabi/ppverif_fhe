@@ -1,6 +1,11 @@
 #![allow(dead_code)]
+use fhe::bfv;
+use fhe_traits::FheEncoder;
 use tfhe::core_crypto::prelude::*;
 use polynomial_algorithms::{polynomial_karatsuba_wrapping_mul, polynomial_wrapping_add_assign, polynomial_wrapping_add_mul_assign};
+use fhe_math::rq::{Representation::PowerBasis, Representation, Poly, self};
+use std::sync::Arc;
+use concrete_ntt::prime32::Plan;
 
 
 #[allow(non_snake_case)]
@@ -168,4 +173,46 @@ fn signed_shr(v: u128, n: usize) -> u128 {
     } else {
         v >> n
     }
+}
+
+pub fn new_rq_poly_ntt_from_slice(coeffs: &[u32], ctx: &Arc<rq::Context>, pt_mod: u64) -> rq::Poly {
+    let mut poly = Poly::zero(&ctx, Representation::PowerBasis);
+    let ninv = {
+        let mut p_minus_two = pt_mod - 2;
+        let mut base = coeffs.len() as u64;
+        let mut ans = 1;
+        while p_minus_two > 0 {
+            if p_minus_two & 0x1 > 0 {
+                ans *= base;
+                ans %= pt_mod;
+            }
+
+            base *= base;
+            base %= pt_mod;
+            p_minus_two >>= 1;
+        }
+
+        ans
+    };
+    
+    let plan = Plan::try_new(coeffs.len(), pt_mod as u32).unwrap();
+    let mut fwd_data = coeffs.iter().map(|&v| (v as u64 * ninv % pt_mod) as u32).collect::<Vec<_>>();
+    plan.inv(&mut fwd_data);  // mul with coeff
+    
+    poly.coefficients_mut().rows_mut().into_iter().for_each(|mut rowi| {
+        rowi.iter_mut().zip(fwd_data.iter()).for_each(|(coeff, &v)| *coeff = v as u64);
+    });
+
+    poly.change_representation(Representation::Ntt);
+    poly
+}
+
+pub fn new_rq_poly_from_slice(coeffs: &[u64], ctx: &Arc<rq::Context>) -> rq::Poly {
+    let mut poly = Poly::zero(&ctx, Representation::PowerBasis);
+    
+    poly.coefficients_mut().rows_mut().into_iter().for_each(|mut rowi| {
+        rowi.iter_mut().zip(coeffs.iter()).for_each(|(coeff, &v)| *coeff = v);
+    });
+
+    poly
 }

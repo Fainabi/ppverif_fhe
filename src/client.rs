@@ -20,6 +20,7 @@ pub struct Client {
     ip_param: GlweParameter<u64>,
     br_param: GlweParameter<u16>,
     bfv_param: Arc<BfvParameters>,
+    bfv_lvl_params: Vec<Arc<BfvParameters>>,
 
     // key for encrypting templates and performing inner product
     glwe_sk_ip: GlweSecretKeyOwned<u64>,
@@ -49,7 +50,7 @@ pub struct Client {
 impl Client {
     /// Instantiate a new client with a default `thread_rng`.
     /// `ip_param` is for inner product, and `br_param` is for blind rotation
-    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u16>, bfv_param: Arc<BfvParameters>) -> Self {
+    pub fn new(ip_param: GlweParameter<u64>, br_param: GlweParameter<u16>, bfv_param: Arc<BfvParameters>) -> Result<Self> {
         let mut seeder = new_seeder();
         
         let mut secret_generator =
@@ -71,10 +72,27 @@ impl Client {
 
         let mut rng = thread_rng();
 
-        Self {
+        let mut bfv_lvl_params = vec![];
+        for i in 0..8 {
+            let new_param = if i <= 1 {
+                bfv_param.clone()
+            } else {
+                let n = bfv_param.moduli().len();
+                bfv::BfvParametersBuilder::new()
+                    .set_degree(bfv_param.degree())
+                    .set_moduli(&bfv_param.moduli()[..n+1-i])
+                    .set_plaintext_modulus(bfv_param.plaintext())
+                    .build_arc()?
+            };
+
+            bfv_lvl_params.push(new_param);
+        }
+
+        Ok(Self {
             ip_param,
             br_param,
             bfv_param,
+            bfv_lvl_params,
             glwe_sk_ip,
             glwe_sk_br,
             bfv_sk,
@@ -85,7 +103,7 @@ impl Client {
             threshold: 0,
             precision: 8,  // [-127, 128]
             database: BTreeMap::new(),
-        }
+        })
     }
 
     /// generate a list of glwe ciphertext as glwe public keys for blind rotation
@@ -119,8 +137,15 @@ impl Client {
             .collect()
     }
 
-    pub fn new_bfv_relinearizatio_key(&self) -> Result<bfv::RelinearizationKey> {
-        bfv::RelinearizationKey::new(&self.bfv_sk, &mut thread_rng())
+    pub fn new_bfv_relinearizatio_key(&self) -> Result<Vec<bfv::RelinearizationKey>> {
+        let mut rlks = vec![];
+
+        for i in 1..self.precision {
+            let rlk = bfv::RelinearizationKey::new_leveled(&self.bfv_sk, i - 1, i - 1, &mut thread_rng())?;
+            rlks.push(rlk);
+        }
+        
+        Ok(rlks)
     }
 
     pub fn set_threshold(&mut self, threshold: f32) {
@@ -363,6 +388,11 @@ impl Client {
         (pt.0 as f32 / self.br_param.delta as f32).round() as u16
     }
 
+    pub fn decyrpt_bfv_ct(&self, bfv_ct: &BfvCiphertext) -> Result<Vec<u64>> {
+        let pt = self.bfv_sk.try_decrypt(&bfv_ct)?;
+        Vec::<u64>::try_decode(&pt, bfv::Encoding::simd())
+    }
+
     /// For calculated masked inner products, encrypt the bits of these values slot-wisely.
     /// Each row of the ciphertext is the grouped ciphertexts,
     /// each column is the encrypted digits for the values
@@ -380,10 +410,14 @@ impl Client {
             let mut cts = vec![];
 
             for i in 0..self.precision {
-                let digits: Vec<_> = vals[idx_bg..idx_ed].iter().map(|&v| (v >> (63 - i)) & 0x1).collect();
+                let digits: Vec<_> = vals[idx_bg..idx_ed].iter().map(|&v| (v >> i) & 0x1).collect();
                 
                 let pt = bfv::Plaintext::try_encode(&digits, bfv::Encoding::simd(), &self.bfv_param)?;
-                let ct = self.bfv_sk.try_encrypt(&pt, &mut rng)?;
+                
+                let mut ct: bfv::Ciphertext = self.bfv_sk.try_encrypt(&pt, &mut rng)?;
+                for _ in 1..i {
+                    ct.mod_switch_to_next_level()?;
+                }
                 cts.push(ct);
             }
             ct_group.push(cts);

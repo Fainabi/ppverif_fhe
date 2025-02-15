@@ -10,17 +10,19 @@ use fhe::bfv::{self, Ciphertext as BfvCiphertext, BfvParameters, RGSWCiphertext}
 use fhe::Result;
 use fhe_traits::*;
 use fhe_math::rq::{Representation::PowerBasis, Representation, Poly, self};
+use crate::rlwe::{new_rq_poly_from_slice, new_rq_poly_ntt_from_slice};
 use crate::{params::*, utils::*};
 
 pub struct Server {
     ip_param: GlweParameter<u64>,
     br_param: GlweParameter<u16>,
     bfv_param: Arc<BfvParameters>,
+    bfv_lvl_params: Vec<Arc<BfvParameters>>,
 
     ctx: Arc<rq::Context>,
-    poly_zero: rq::Poly,
-    poly_one: rq::Poly,
-    bfv_rlk: bfv::RelinearizationKey,
+    // poly_zero: rq::Poly,
+    // poly_one: rq::Poly,
+    bfv_rlks: Vec<bfv::RelinearizationKey>,
 
     // any data structure
     database: BTreeMap<u128, Vec<GlweBody<Vec<u64>>>>,
@@ -40,7 +42,7 @@ impl Server {
         br_param: GlweParameter<u16>, 
         bfv_param: Arc<BfvParameters>, 
         glwe_pk: Vec<GlweCiphertextOwned<u16>>, 
-        bfv_rlk: bfv::RelinearizationKey,
+        bfv_rlks: Vec<bfv::RelinearizationKey>,
     ) -> Result<Self> {
         let noise_distribution = Gaussian::from_standard_dev(StandardDev(br_param.std_dev), 0.0);
         let ctx = rq::Context::new_arc(bfv_param.moduli(), bfv_param.degree())?;
@@ -48,16 +50,32 @@ impl Server {
         let mut vec_one = vec![0u64; bfv_param.degree()];
         vec_one[0] = 1;
 
-        let poly_one = bfv::Plaintext::try_encode(&vec_one, bfv::Encoding::simd(), &bfv_param)?.to_poly();
+        // let poly_one = new_rq_poly_ntt_from_slice(&vec_one, &ctx);
+        let mut bfv_lvl_params = vec![];
+        for i in 0..8 {
+            let new_param = if i <= 1 {
+                bfv_param.clone()
+            } else {
+                let n = bfv_param.moduli().len();
+                bfv::BfvParametersBuilder::new()
+                    .set_degree(bfv_param.degree())
+                    .set_moduli(&bfv_param.moduli()[..n+1-i])
+                    .set_plaintext_modulus(bfv_param.plaintext())
+                    .build_arc()?
+            };
+
+            bfv_lvl_params.push(new_param);
+        }
 
         Ok(Self {
             ip_param,
             br_param,
             bfv_param,
-            poly_zero,
-            poly_one,
+            bfv_lvl_params,
+            // poly_zero,
+            // poly_one,
             ctx,
-            bfv_rlk,
+            bfv_rlks,
             database: BTreeMap::new(),
             glwe_pk,
             noise_distribution,
@@ -146,7 +164,7 @@ impl Server {
 
     }
 
-    pub fn batch_fold(&self, cts: Vec<Vec<BfvCiphertext>>, ips: Vec<u64>) -> Result<Vec<Vec<BfvCiphertext>>> {
+    pub fn batch_fold(&self, cts: Vec<Vec<BfvCiphertext>>, ips: &[u64]) -> Result<Vec<BfvCiphertext>> {
         let n = ips.len();
         let poly_deg = self.bfv_param.degree();
 
@@ -156,18 +174,49 @@ impl Server {
             let idx_ed = ((g_idx + 1) * poly_deg).min(n);
 
             // construct digits first
+            let digits = (0..self.precision).map(|i| {
+                ips[idx_bg..idx_ed]
+                    .iter()
+                    .map(|&v| ((v >> i) & 0x1) as u32)
+                    .collect::<Vec<_>>()
+            }).collect::<Vec<_>>();
+
             let mut digit_polys = vec![];
             for i in 0..self.precision {
-                let digits = ips[idx_bg..idx_ed]
-                    .iter()
-                    .map(|&v| (v >> (63 - i)) & 0x1)
-                    .collect::<Vec<_>>();
+                // let digits = ips[idx_bg..idx_ed]
+                //     .iter()
+                //     .map(|&v| (v >> (63 - i)) & 0x1)
+                //     .collect::<Vec<_>>();
                 
-                let poly = bfv::Plaintext::try_encode(&digits, bfv::Encoding::simd(), &self.bfv_param)?;
+                // let poly = bfv::Plaintext::try_encode(&digits, bfv::Encoding::simd(), &self.bfv_param)?;
                 // poly.to_poly()
-                // let poly = rq::Poly::zero(&self.ctx, Representation::Ntt);
-                
-                digit_polys.push(poly.to_poly());
+                // let mut poly = rq::Poly::zero(&self.ctx, Representation::PowerBasis);
+                // for _ in 1..i {
+                //     poly.mod_switch_down_next()?;
+                // }
+                // for (dig_i, &dig) in digits.iter().enumerate() {
+                //     for row_i in 0..poly.coefficients_mut().ndim() {
+                //         poly.coefficients_mut()[(row_i, dig_i)] = dig;
+                //     }
+                // }
+
+                // poly.change_representation(Representation::Ntt);
+
+                let ctx = if i <= 1 {
+                    self.ctx.clone()
+                } else {
+                    let mod_n = self.bfv_param.moduli().len();
+                    rq::Context::new_arc(&self.bfv_param.moduli()[..mod_n+1-i], self.bfv_param.degree())?
+                };
+                // // SAFE: ?
+                // let poly = unsafe {
+                //     Poly::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(&digits, &ctx)
+                // };
+
+                let poly = new_rq_poly_ntt_from_slice(&digits[i], &ctx, self.bfv_param.plaintext());
+
+                // digit_polys.push(poly.to_poly());
+                digit_polys.push(poly);
             }
 
             // now fold the packed ciphertexts and digits for determine sign of (ct + ip)
@@ -180,83 +229,79 @@ impl Server {
             //            w_1^{(0)} w_1^{(1)} ... w_1^{7};
             //            w_2^{(0)} w_2^{(1)} ... w_2^{7};
             //                            ... ]
-            let mut ct_ans = vec![];
-            for (i, (ct_i, w_i)) in ct.iter().zip(digit_polys.iter()).enumerate() {
-                
-                let mut acc_i = ct_i.clone();
-                let neg_double_w = - (w_i + w_i);
+            let mut carry = ct[0].clone();
+            carry[0] *= &digit_polys[0];
+            carry[1] *= &digit_polys[0];
+            return Ok(vec![carry]);
 
-                // 2 * w * c
-                acc_i[0] *= &neg_double_w;
-                acc_i[1] *= &neg_double_w;
+            let mut one = vec![0u64; self.bfv_param.degree()];
+            one[0] = 1;
 
-                // c - 2 * w * c
-                acc_i += ct_i;
+            // iter
+            for i in 1..self.precision-1 {
+                let ct_i = &ct[i];
+                let w_i = &digit_polys[i];
 
-                // (w, 0) + c - 2 * w * c
-                acc_i[0] += w_i;
-
-                let acc_i = if i + 1 == self.precision {
-                    let mut neg_double_acci = -acc_i.clone();
-                    neg_double_acci += &-acc_i;
-                    neg_double_acci[0] += &self.poly_one;
-                    neg_double_acci
+                let ctx = if i <= 1 {
+                    self.ctx.clone()
                 } else {
-                    acc_i
+                    let mod_n = self.bfv_param.moduli().len();
+                    rq::Context::new_arc(&self.bfv_param.moduli()[..mod_n+1-i], self.bfv_param.degree())?
                 };
 
-                ct_ans.push(acc_i);
-            }
+                let mut carry_times_c = &carry * ct_i;
+                let mut poly_one = new_rq_poly_from_slice(&one, &ctx);
+                poly_one.change_representation(Representation::Ntt);
+                let one_minus_dbl_w = poly_one + -w_i + -w_i;
 
-            self.fold_mul(&mut ct_ans)?;
-            ct_group.push(ct_ans);
+                carry_times_c[0] *= &one_minus_dbl_w;
+                carry_times_c[1] *= &one_minus_dbl_w;
+                carry_times_c[2] *= &one_minus_dbl_w;
+                self.bfv_rlks[i-1].relinearizes(&mut carry_times_c)?;
+
+                carry += ct_i;
+                carry[0] *= w_i;
+                carry[1] *= w_i;
+
+                carry += &carry_times_c;
+                carry.mod_switch_to_next_level()?;
+                
+            }
+            return Ok(vec![carry]);
+
+            // xor
+            // let mod_n = self.bfv_param.moduli().len();
+            // let ctx = rq::Context::new_arc(&self.bfv_param.moduli()[..mod_n+2-self.precision], self.bfv_param.degree())?;
+            let mut pt_one = bfv::Plaintext::try_encode(&one, bfv::Encoding::poly(), &self.bfv_lvl_params[self.precision-1])?.to_poly();
+            // pt_one.mod_switch_down_to(&ctx)?;
+            pt_one.change_representation(Representation::Ntt);
+
+            let mut one_minus_two_carry = &-carry.clone() + &-carry.clone();
+            one_minus_two_carry[0] += &pt_one;
+            
+            let mut w_times_c = ct[self.precision-1].clone();
+            w_times_c[0] *= &digit_polys[self.precision-1];
+            w_times_c[1] *= &digit_polys[self.precision-1];
+
+            let mut neg_w_c_add_c = &ct[self.precision-1] + &(&-w_times_c.clone() + &-w_times_c);
+            let pt_w = bfv::Plaintext::try_encode(
+                &digits[self.precision-1].iter().map(|&v| v as u64).collect::<Vec<_>>(), 
+                bfv::Encoding::simd(), 
+                &self.bfv_lvl_params[self.precision-1]
+            )?.to_poly();
+            // pt_w.mod_switch_down_to(&ctx)?;
+
+            neg_w_c_add_c[0] += &pt_w;
+
+            let mut muls = &one_minus_two_carry * &neg_w_c_add_c;
+            self.bfv_rlks[self.precision-2].relinearizes(&mut muls)?;
+            carry += &muls;
+            carry.mod_switch_to_next_level()?;
+
+            ct_group.push(carry);
         }
 
         Ok(ct_group)
-    }
-
-    pub fn fold_mul(&self, cts: &mut [BfvCiphertext]) -> Result<()> {
-        if cts.len() <= 1 {
-            return Ok(());
-        }
-
-        let len = cts.len();
-        let nearest_pow2 = {
-            let mut cnt = 0;
-            let mut len = len;
-            while len > 1 {
-                len >>= 1;
-                cnt += 1;
-            }
-
-            1usize << cnt
-        };
-
-        if nearest_pow2 != len {
-            self.fold_mul(&mut cts[..len-nearest_pow2])?;
-            self.fold_mul(&mut cts[len-nearest_pow2..])?;
-
-            for i in len-nearest_pow2..len {
-                cts[i] = &cts[i] * &cts[len-nearest_pow2-1];
-                self.bfv_rlk.relinearizes(&mut cts[i])?;
-            }
-        } else {            
-            let mid = nearest_pow2 / 2;
-            self.fold_mul(&mut cts[len-mid..])?;
-            self.fold_mul(&mut cts[..len-mid])?;
-
-            // then reduce
-            for i in len-mid..len {
-                cts[i] = &cts[i] * &cts[len-mid-1];
-                self.bfv_rlk.relinearizes(&mut cts[i])?;
-            }
-        }
-
-        // for ct in cts.iter_mut() {
-        //     ct.mod_switch_to_next_level()?;
-        // }
-
-        Ok(())
     }
 
     fn new_zero_encryption(&mut self) -> GlweCiphertextOwned<u16> {
