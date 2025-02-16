@@ -177,7 +177,7 @@ impl Server {
             let digits = (0..self.precision).map(|i| {
                 ips[idx_bg..idx_ed]
                     .iter()
-                    .map(|&v| ((v >> i) & 0x1) as u32)
+                    .map(|&v| (v >> i) & 0x1)
                     .collect::<Vec<_>>()
             }).collect::<Vec<_>>();
 
@@ -213,7 +213,10 @@ impl Server {
                 //     Poly::create_constant_ntt_polynomial_with_lazy_coefficients_and_variable_time(&digits, &ctx)
                 // };
 
-                let poly = new_rq_poly_ntt_from_slice(&digits[i], &ctx, self.bfv_param.plaintext());
+                // let poly = new_rq_poly_ntt_from_slice(&digits[i], &ctx, self.bfv_param.plaintext())?;
+                let poly = bfv::Plaintext::try_encode(&digits[i], bfv::Encoding::simd(), &self.bfv_param)?.to_poly_no_level();
+                // poly.change_representation(Representation::PowerBasis);
+                // println!("poly: {:?}", poly);
 
                 // digit_polys.push(poly.to_poly());
                 digit_polys.push(poly);
@@ -232,13 +235,14 @@ impl Server {
             let mut carry = ct[0].clone();
             carry[0] *= &digit_polys[0];
             carry[1] *= &digit_polys[0];
-            return Ok(vec![carry]);
+            // return Ok(vec![carry]);
 
             let mut one = vec![0u64; self.bfv_param.degree()];
             one[0] = 1;
 
             // iter
             for i in 1..self.precision-1 {
+                println!("i: {}", i);
                 let ct_i = &ct[i];
                 let w_i = &digit_polys[i];
 
@@ -249,35 +253,41 @@ impl Server {
                     rq::Context::new_arc(&self.bfv_param.moduli()[..mod_n+1-i], self.bfv_param.degree())?
                 };
 
+                println!("mul1");
                 let mut carry_times_c = &carry * ct_i;
-                let mut poly_one = new_rq_poly_from_slice(&one, &ctx);
+                let mut poly_one = new_rq_poly_from_slice(&one, &self.ctx);
                 poly_one.change_representation(Representation::Ntt);
+
+                println!("add2");
                 let one_minus_dbl_w = poly_one + -w_i + -w_i;
 
+                println!("mul ext");
                 carry_times_c[0] *= &one_minus_dbl_w;
                 carry_times_c[1] *= &one_minus_dbl_w;
                 carry_times_c[2] *= &one_minus_dbl_w;
-                self.bfv_rlks[i-1].relinearizes(&mut carry_times_c)?;
+                self.bfv_rlks[0].relinearizes(&mut carry_times_c)?;
 
+                println!("mul");
                 carry += ct_i;
                 carry[0] *= w_i;
                 carry[1] *= w_i;
 
+                println!("add");
                 carry += &carry_times_c;
-                carry.mod_switch_to_next_level()?;
+                // carry.mod_switch_to_next_level()?;
                 
             }
-            return Ok(vec![carry]);
+            // return Ok(vec![carry]);
 
             // xor
             // let mod_n = self.bfv_param.moduli().len();
             // let ctx = rq::Context::new_arc(&self.bfv_param.moduli()[..mod_n+2-self.precision], self.bfv_param.degree())?;
-            let mut pt_one = bfv::Plaintext::try_encode(&one, bfv::Encoding::poly(), &self.bfv_lvl_params[self.precision-1])?.to_poly();
+            // let mut pt_one = bfv::Plaintext::try_encode(&one, bfv::Encoding::poly(), &self.bfv_lvl_params[self.precision-1])?.to_poly();
             // pt_one.mod_switch_down_to(&ctx)?;
-            pt_one.change_representation(Representation::Ntt);
+            // pt_one.change_representation(Representation::Ntt);
 
-            let mut one_minus_two_carry = &-carry.clone() + &-carry.clone();
-            one_minus_two_carry[0] += &pt_one;
+            // let mut neg_dbl_carry = &-carry.clone() + &-carry.clone();
+            // one_minus_two_carry[0] += &pt_one;
             
             let mut w_times_c = ct[self.precision-1].clone();
             w_times_c[0] *= &digit_polys[self.precision-1];
@@ -285,18 +295,25 @@ impl Server {
 
             let mut neg_w_c_add_c = &ct[self.precision-1] + &(&-w_times_c.clone() + &-w_times_c);
             let pt_w = bfv::Plaintext::try_encode(
-                &digits[self.precision-1].iter().map(|&v| v as u64).collect::<Vec<_>>(), 
-                bfv::Encoding::simd(), 
-                &self.bfv_lvl_params[self.precision-1]
-            )?.to_poly();
-            // pt_w.mod_switch_down_to(&ctx)?;
+                &digits[self.precision-1], 
+                bfv::Encoding::simd_at_level(0), 
+                &self.bfv_param
+            )?;
 
-            neg_w_c_add_c[0] += &pt_w;
+            neg_w_c_add_c += &pt_w;
 
-            let mut muls = &one_minus_two_carry * &neg_w_c_add_c;
-            self.bfv_rlks[self.precision-2].relinearizes(&mut muls)?;
-            carry += &muls;
-            carry.mod_switch_to_next_level()?;
+            carry -= &neg_w_c_add_c;
+            // return Ok(vec![carry]);
+            carry = &carry * &carry;
+            self.bfv_rlks[0].relinearizes(&mut carry)?;
+
+            
+
+            // let mut muls = &neg_dbl_carry * &neg_w_c_add_c;
+            // self.bfv_rlks[self.precision-2].relinearizes(&mut muls)?;
+            // carry += &muls;
+            // carry += &neg_w_c_add_c;
+            // carry.mod_switch_to_last_level()?;
 
             ct_group.push(carry);
         }

@@ -412,12 +412,10 @@ impl Client {
             for i in 0..self.precision {
                 let digits: Vec<_> = vals[idx_bg..idx_ed].iter().map(|&v| (v >> i) & 0x1).collect();
                 
-                let pt = bfv::Plaintext::try_encode(&digits, bfv::Encoding::simd(), &self.bfv_param)?;
-                
-                let mut ct: bfv::Ciphertext = self.bfv_sk.try_encrypt(&pt, &mut rng)?;
-                for _ in 1..i {
-                    ct.mod_switch_to_next_level()?;
-                }
+                let level = if i <= 1 { 0 } else { i - 1 };
+                let pt = bfv::Plaintext::try_encode(&digits, bfv::Encoding::simd_at_level(0), &self.bfv_param)?;
+                let ct: bfv::Ciphertext = self.bfv_sk.try_encrypt(&pt, &mut rng)?;
+
                 cts.push(ct);
             }
             ct_group.push(cts);

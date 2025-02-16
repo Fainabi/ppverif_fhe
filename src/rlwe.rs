@@ -1,10 +1,11 @@
 #![allow(dead_code)]
-use fhe::bfv;
+use fhe::{bfv, Result};
 use fhe_traits::FheEncoder;
 use tfhe::core_crypto::prelude::*;
 use polynomial_algorithms::{polynomial_karatsuba_wrapping_mul, polynomial_wrapping_add_assign, polynomial_wrapping_add_mul_assign};
-use fhe_math::rq::{Representation::PowerBasis, Representation, Poly, self};
+use fhe_math::{ntt, rq::{self, traits::TryConvertFrom, Poly, Representation::{self, PowerBasis}}, zq::Modulus};
 use std::sync::Arc;
+use fhe_math::ntt::NttOperator;
 use concrete_ntt::prime32::Plan;
 
 
@@ -175,7 +176,7 @@ fn signed_shr(v: u128, n: usize) -> u128 {
     }
 }
 
-pub fn new_rq_poly_ntt_from_slice(coeffs: &[u32], ctx: &Arc<rq::Context>, pt_mod: u64) -> rq::Poly {
+pub fn new_rq_poly_ntt_from_slice(coeffs: &[u64], ctx: &Arc<rq::Context>, pt_mod: u64) -> Result<rq::Poly> {
     let mut poly = Poly::zero(&ctx, Representation::PowerBasis);
     let ninv = {
         let mut p_minus_two = pt_mod - 2;
@@ -194,17 +195,21 @@ pub fn new_rq_poly_ntt_from_slice(coeffs: &[u32], ctx: &Arc<rq::Context>, pt_mod
 
         ans
     };
+    let ntt_op = NttOperator::new(&Modulus::new(pt_mod)?, coeffs.len()).unwrap();
+    let mut bkd_data = coeffs.iter().map(|&v| (v) % pt_mod).collect::<Vec<_>>();
+    ntt_op.backward(&mut bkd_data);
     
-    let plan = Plan::try_new(coeffs.len(), pt_mod as u32).unwrap();
-    let mut fwd_data = coeffs.iter().map(|&v| (v as u64 * ninv % pt_mod) as u32).collect::<Vec<_>>();
-    plan.inv(&mut fwd_data);  // mul with coeff
+    // let plan = Plan::try_new(coeffs.len(), pt_mod as u32).unwrap();
+    // let mut fwd_data = coeffs.iter().map(|&v| (v as u64 * ninv % pt_mod) as u32).collect::<Vec<_>>();
+    // plan.inv(&mut fwd_data);  // mul with coeff
     
-    poly.coefficients_mut().rows_mut().into_iter().for_each(|mut rowi| {
-        rowi.iter_mut().zip(fwd_data.iter()).for_each(|(coeff, &v)| *coeff = v as u64);
-    });
+    let mut poly = Poly::try_convert_from(&bkd_data, ctx, false, Representation::PowerBasis)?;
+    // poly.coefficients_mut().rows_mut().into_iter().for_each(|mut rowi| {
+    //     rowi.iter_mut().zip(bkd_data.iter()).for_each(|(coeff, &v)| *coeff = v as u64);
+    // });
 
     poly.change_representation(Representation::Ntt);
-    poly
+    Ok(poly)
 }
 
 pub fn new_rq_poly_from_slice(coeffs: &[u64], ctx: &Arc<rq::Context>) -> rq::Poly {

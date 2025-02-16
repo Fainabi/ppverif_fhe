@@ -14,14 +14,50 @@ fn main() -> Result<()> {
     let parameters = bfv::BfvParametersBuilder::new()
         .set_degree(4096)
         .set_moduli(&[
-            0x3fffffff000001_u64, 
-            0x3fffffff004001_u64, 
+            // 0x100006001,
+            // 0x100014001,
+            // 0x100036001,
+            // 0x100050001,
+            // 0x10005c001,
+            // 0x100086001,
+            // 0x100098001,
+            // 0x1000b0001,
+            // 0x1000e6001,
+            // 0x10010a001,
+            // 0x100132001,
+            // 0x100174001,
+            // 0x100176001,
+            // 0x100180001,
+            // 0x1001c4001,
+            // 0x1001ce001,
+            // 0x1001d6001,
+            // 0x1001ee001,
+            // 0x100230001,
+            // 0x10023a001,
+            // 0x10023c001,
+            // 0x100248001,
+            // 0x100252001,
+            // 0x10025a001,
+            // 0x100270001,
+            // 0x1002a8001,
+            // 0x1002b2001,
+            // 0x1002fa001,
+            // 0x10030c001,
+            // 0x100324001,
+            // 0x100330001,
+            // 0x100348001,
+            // 0x100360001,
+            // 0x100368001,
+            // 0x10037e001,
+            0x3fffffff000001, 
+            0x3fffffff004001, 
             0x3fffffff04e001, 
             0x3fffffff058001, 
             0x3fffffff07c001, 
             0x3fffffff0c6001, 
             0x3fffffff0cc001, 
-            0x3fffffff0d2001
+            0x3fffffff0d2001,
+            0x3fffffff124001,
         ])
         .set_plaintext_modulus(0x88001)
         .build_arc()?;
@@ -46,17 +82,21 @@ fn main() -> Result<()> {
     // }
     println!("enc time: {} ms", elapsed.as_micros() as f32 / 1000.0);
 
-    let vs = (0..4096).map(|_| rng.next_u64()).collect::<Vec<_>>();
+    let vs = (0..4096).map(|i| rng.next_u64()).collect::<Vec<_>>();
     let now = Instant::now();
     let folded = server.batch_fold(cts, &vs)?;
     let elapsed = now.elapsed();
+    let sums = vals.iter().zip(vs.iter()).map(|(&v1, &v2)| (((v1 & 0b11111111) + (v2 & 0b11111111)) >> 7) & 0x1).collect::<Vec<_>>();
     for ct in folded.iter() {
         let pt = client.decyrpt_bfv_ct(ct)?;
-        println!("pt: {:?}", pt);
+        let diff = pt.iter().zip(sums.iter()).map(|(&v1, &v2)| v1 - v2).collect::<Vec<_>>();
+        println!("diff: {:?}", diff);
+        // println!("pt: {:?}", pt);
+        // println!("sums: {:?}", sums);
     }
 
-    let sums = vals.iter().zip(vs.iter()).map(|(&v1, &v2)| (((v1 & 0b1) + (v2 & 0b1)) >> 1) & 0x1).collect::<Vec<_>>();
-    println!("sums: {:?}", sums);
+    
+    // println!("sums: {:?}", sums);
     println!("fold time: {}", elapsed.as_micros() as f32 / 1000.0);
     
     // let pt = Plaintext::try_encode(&vals, Encoding::simd(), &parameters)?;
