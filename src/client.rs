@@ -224,7 +224,7 @@ impl Client {
             })
             .collect::<Vec<_>>();
 
-        self.database.insert(0, decrypted_masks);
+        self.database.insert(id, decrypted_masks);
     }
 
     /// Encrypt a new Glwe Ciphertext for inner product

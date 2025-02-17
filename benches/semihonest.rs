@@ -73,5 +73,53 @@ fn pk_enc_benchmark(c: &mut Criterion) {
     });
 }
 
+fn identif_benchmark(c: &mut Criterion) {
+    let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER);
+    let glwe_pk = client.new_glwe_public_keys_br();
+    let mut server= Server::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, glwe_pk);
+
+    let mut rng = thread_rng();
+
+    println!("Generate samples");
+    for i in 0..(1 << 16) {
+        let mut features_to_enroll = (0..DEFAULT_INNER_PRODUCT_PARAMETER.polynomial_size.0)
+            .map(|_| (rng.next_u32() % 1024) as f32 / 1024.0)
+            .collect::<Vec<_>>();
+
+        normalize(&mut features_to_enroll);
+
+        let ggsw = client.encrypt_new_template(0, &features_to_enroll, 512.0);
+        client.enroll_ggsw_masks(i);
+        server.enroll(i, ggsw);
+    }
+
+    let mut features_to_verif = (0..DEFAULT_INNER_PRODUCT_PARAMETER.polynomial_size.0)
+        .map(|_| (rng.next_u32() % 1024) as f32 / 1024.0)
+        .collect::<Vec<_>>();
+    normalize(&mut features_to_verif);
+    
+    c.bench_function("New Template Encryption", |b| {
+        b.iter(|| {
+            client.encrypt_glwe(&features_to_verif, 512.0);
+        });
+    });
+
+    let query_ct = client.encrypt_glwe(&features_to_verif, 512.0);
+
+    c.bench_function("Client calculate inner prod", |b| b.iter(|| {
+        for id in 0..(1 << 16) {
+            client.transform_mask_to_body_from_database(id, query_ct.as_view());
+        }
+    }));
+
+
+    c.bench_function("Server calculate inner prod", |b| b.iter(|| {
+        for id in 0..(1 << 16) {
+            server.compute_innerprod_body(id, query_ct.as_view());
+        }
+    }));
+}
+
 criterion_group!(benches, pk_enc_benchmark);
+// criterion_group!(benches, identif_benchmark);  // naive matrix multiplication
 criterion_main!(benches);

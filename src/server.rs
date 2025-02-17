@@ -78,35 +78,38 @@ impl Server {
                 let innerprod_body: u64 = template_ggsw_bodies
                     .chunks(self.ip_param.decomposition_level_count.0)
                     .zip(query_ct.as_polynomial_list().iter())
-                    .flat_map(|(template_glev_bodies, query_poly)| {
-                        let query_container = query_poly.into_container();
+                    .fold(0u64, |sum_body, (template_glev_bodies, query_poly)| {
+                        // let query_container = query_poly.into_container();
 
-                        template_glev_bodies
+                        let polly_mul = template_glev_bodies
                             .iter()
                             .enumerate()
                             .map(|(beta_idx, template_body)| {
                                 let idx = self.ip_param.decomposition_level_count.0 - beta_idx;
                                 let template_container = template_body.as_polynomial().into_container();
-
-                                let mut sum = 0;
-                                for (poly_i, (&vi, &wi)) in template_container
+                                let query_container: Vec<_> = query_poly
+                                    .into_container()
                                     .iter()
-                                    .zip(query_container.iter().take(1).chain(query_container[1..].iter().rev()))
-                                    .enumerate()
+                                    .map(|&v| {
+                                        let v = v >> (self.ip_param.decomposition_base_log.0 * idx);
+                                        v & ((1u64 << self.ip_param.decomposition_base_log.0) - 1)
+                                    })
+                                    .collect();
+
+                                let mut sum = query_container[0].wrapping_mul(template_container[0]);
+                                for (&vi, &wi) in template_container[1..]
+                                    .iter()
+                                    .zip(query_container[1..].iter().rev())
                                 {
-                                    let wi = wi >> (self.ip_param.decomposition_base_log.0 * idx);
-                                    let wi = wi & ((1u64 << self.ip_param.decomposition_base_log.0) - 1);
-                                    if poly_i == 0 {
-                                        sum = sum.wrapping_add(vi.wrapping_mul(wi));
-                                    } else {
-                                        sum = sum.wrapping_sub(vi.wrapping_mul(wi));
-                                    }
+                                    sum = sum.wrapping_sub(vi.wrapping_mul(wi));
                                 }
 
                                 sum
                             })
-                    })
-                    .fold(0u64, |acc, x| acc.wrapping_add(x));
+                            .fold(0u64, |acc, x| acc.wrapping_add(x));
+
+                        sum_body.wrapping_add(polly_mul)
+                    });
 
                 #[cfg(feature = "debug")]
                 println!("inner prod body: {}", innerprod_body);
