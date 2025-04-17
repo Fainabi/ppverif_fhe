@@ -11,6 +11,8 @@ fhe-traits = { path = "../fhe.rs/crates/fhe-traits" }
 fhe-math = { path = "../fhe.rs/crates/fhe-math" }
 thiserror = "2.0.9"
 nalgebra = "0.33.2"
+concrete-fft = "0.4.1"
+aligned-vec = "0.5.0"
 
 [features]
 debug = []
@@ -36,4 +38,8 @@ harness = false
 
 [[bench]]
 name = "matmul"
+harness = false
+
+[[bench]]
+name = "extprod"
 harness = false

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::*;
 use std::ops::AddAssign;
 use std::sync::Arc;
 use rand::{rngs::ThreadRng, thread_rng, Rng, RngCore};
@@ -9,6 +9,8 @@ use fhe::bfv::{self, Ciphertext as BfvCiphertext, BfvParameters, RGSWCiphertext}
 use fhe::Result;
 use fhe_traits::*;
 use fhe_math::rq::{Representation::PowerBasis, Representation, Poly, self};
+use aligned_vec::ABox;
+use concrete_fft::c64;
 use crate::{params::*, utils::*};
 
 pub struct Server {
@@ -615,3 +617,53 @@ impl AntiMalServer {
 }
 
 
+pub struct StateLessServer {
+    param: GlweParameter<u64>,
+
+    database: HashMap<u128, (FourierGgswCiphertext<ABox<[c64]>>, FourierGgswCiphertext<ABox<[c64]>>)>,
+}
+
+impl StateLessServer {
+    pub fn new(param: GlweParameter<u64>) -> Self {
+        Self {
+            param,
+            database: HashMap::new(),
+        }
+    }
+
+    pub fn enroll(&mut self, id: u128, templates: (GgswCiphertextOwned<u64>, GgswCiphertextOwned<u64>)) {
+        let (ct_mod_2, ct_mod_p) = templates;
+        let mut ct_mod_2_fft = FourierGgswCiphertext::new(ct_mod_2.glwe_size(), ct_mod_2.polynomial_size(), ct_mod_2.decomposition_base_log(), ct_mod_2.decomposition_level_count());
+        let mut ct_mod_p_fft = FourierGgswCiphertext::new(ct_mod_p.glwe_size(), ct_mod_p.polynomial_size(), ct_mod_p.decomposition_base_log(), ct_mod_p.decomposition_level_count());
+
+        convert_standard_ggsw_ciphertext_to_fourier(&ct_mod_2, &mut ct_mod_2_fft);
+        convert_standard_ggsw_ciphertext_to_fourier(&ct_mod_p, &mut ct_mod_p_fft);
+
+        self.database.insert(id, (ct_mod_2_fft, ct_mod_p_fft));
+    }
+
+    pub fn verify(&self, id: u128, cts: (GlweCiphertextOwned<u64>, GlweCiphertextOwned<u64>)) -> Option<LweCiphertextOwned<u64>> {
+        match self.database.get(&id) {
+            None => None,
+            Some((ggsw_mod2, ggsw_modp)) => {
+                let (glwe_mod2, glwe_modp) = cts;
+                let mut ct_mul = GlweCiphertext::new(0, glwe_mod2.glwe_size(), glwe_mod2.polynomial_size(), glwe_mod2.ciphertext_modulus());
+
+                // x mod 2 - x mod p
+                add_external_product_assign(&mut ct_mul, ggsw_modp, &glwe_modp);
+                // ct_mul.as_mut().iter_mut().for_each(|v| *v = (*v).wrapping_neg());       
+                // add_external_product_assign(&mut ct_mul, &ggsw_mod2, &glwe_mod2);
+
+                let mut ct_out = LweCiphertext::new(
+                    0, 
+                    LweSize(ct_mul.polynomial_size().0 * ct_mul.glwe_size().to_glwe_dimension().0 + 1),
+                    ct_mul.ciphertext_modulus()
+                );
+                extract_lwe_sample_from_glwe_ciphertext(&ct_mul, &mut ct_out, MonomialDegree(0));
+                // lwe_ciphertext_cleartext_mul_assign(&mut ct_out, Cleartext(self.param.plaintext_modulus / 2));
+
+                Some(ct_out)
+            }
+        }
+    }
+}

@@ -4,8 +4,8 @@ use nalgebra;
 
 
 pub fn matmul(c: &mut Criterion) {
-    let row = 1 << 16;
-    let col = 512;
+    let row = 512 * 6;
+    let col = 512 * 6;
     let mut rng = thread_rng();
 
     let dataA = (0..row*col).map(|_| 

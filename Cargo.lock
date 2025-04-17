@@ -818,6 +818,8 @@ dependencies = [
 name = "ppverif_fhe"
 version = "0.1.0"
 dependencies = [
+ "aligned-vec",
+ "concrete-fft",
  "criterion",
  "fhe",
  "fhe-math",

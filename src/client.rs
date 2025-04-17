@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::sync::Arc;
 use std::collections::BTreeMap;
+use fhe_math::rq::Poly;
 use rand::{rngs::OsRng, *};
 use tfhe::core_crypto::prelude::*;
 use tfhe::core_crypto::commons::math::random::*;
@@ -11,6 +12,7 @@ use fhe_math::rq::Representation::PowerBasis;
 use fhe_traits::*;
 
 use crate::params::*;
+use crate::server::StateLessServer;
 use crate::utils::*;
 use crate::seeder::IdSeeder;
 
@@ -732,4 +734,275 @@ impl MaliciousClient {
         
         encoded
     }
+}
+
+
+pub struct StateLessClient {
+    param: GlweParameter<u64>,
+
+    sk: GlweSecretKeyOwned<u64>,
+
+    distribution: Gaussian<f64>,
+}
+
+impl StateLessClient {
+    pub fn new(param: GlweParameter<u64>) -> Self {
+        let mut seeder = new_seeder();
+        
+        let mut secret_generator =
+            SecretRandomGenerator::<ActivatedRandomGenerator>::new(seeder.seed());
+
+        let sk = GlweSecretKey::generate_new_binary(
+            GlweDimension(param.glwe_size.0 - 1),
+            param.polynomial_size,
+            &mut secret_generator,
+        );
+
+        Self {
+            param,
+            
+            sk,
+
+            distribution: Gaussian::from_dispersion_parameter(StandardDev(param.std_dev), 0.0),
+        }
+    }
+
+    fn encode(&self, features: &[f32], scale: f32) -> (Vec<u64>, Vec<u64>) {
+        let (mut pt_mod2, mut pt_modp) = (vec![0u64; self.param.polynomial_size.0], vec![0u64; self.param.polynomial_size.0]);
+        let p = self.param.plaintext_modulus / 2;
+
+        for (i, &v) in features.iter().enumerate() {
+            let v = (v * scale).round() as i64;
+            if v >= 0 {
+                pt_mod2[i] = (v as u64 % 2) * self.param.delta;
+                pt_modp[i] = (v as u64 % p) * self.param.delta;
+            } else {
+                println!("x {} x%p {}", v, v % p as i64);
+                let t_minus_v = self.param.plaintext_modulus as i64 + v as i64;
+                pt_mod2[i] = (t_minus_v as u64 % 2) * self.param.delta;
+                // pt_mod2[i] = ((self.param.plaintext_modulus as i64 + (v % 2)) as u64) * self.param.delta;
+                pt_modp[i] = (t_minus_v as u64 % p) * self.param.delta;
+                // pt_modp[i] = ((self.param.plaintext_modulus as i64 + (v % p as i64)) as u64) * self.param.delta;
+                // t_minus_v as u64 * self.param.delta
+            }
+        }
+
+        (pt_mod2, pt_modp)
+    }
+
+    /// encrypt the features on the coefficient of polynomial
+    /// plaintext is power-of-two, no need for batch inner product
+    pub fn encrypt_glwe(&self, features: &[f32], scale: f32) -> (GlweCiphertextOwned<u64>, GlweCiphertextOwned<u64>) {
+        let mut seeder = new_seeder();
+
+        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            seeder.seed(),
+            seeder.as_mut(),
+        );
+
+
+        let ciphertext_modulus = CiphertextModulus::new_native();
+        let mut glwe_mod2 = GlweCiphertext::new(
+            0u64,
+            self.param.glwe_size,
+            self.param.polynomial_size,
+            ciphertext_modulus,
+        );
+        let mut glwe_modp = GlweCiphertext::new(
+            0u64,
+            self.param.glwe_size,
+            self.param.polynomial_size,
+            ciphertext_modulus,
+        );
+
+        let (msgs_mod2, msgs_modp) = self.encode(features, scale);
+        let pt_mod2 = PlaintextList::from_container(msgs_mod2);
+        let pt_modp = PlaintextList::from_container(msgs_modp);
+
+        encrypt_glwe_ciphertext(
+            &self.sk,
+            &mut glwe_mod2,
+            &pt_mod2,
+            self.distribution,
+            &mut encryption_generator,
+        );
+        encrypt_glwe_ciphertext(
+            &self.sk,
+            &mut glwe_modp,
+            &pt_modp,
+            self.distribution,
+            &mut encryption_generator,
+        );
+
+        (glwe_mod2, glwe_modp)
+    }
+
+    pub fn encrypt_ggsw(&self, features: &[f32], scale: f32) -> (GgswCiphertextOwned<u64>, GgswCiphertextOwned<u64>) {
+        // encode the features into cleartext, mod t
+        // let rounded = features
+        //     .iter()
+        //     .map(|&v| (v * scale).round() as i64)
+        //     .collect::<Vec<_>>();
+
+        let cleartext = features
+            .iter()
+            .map(|&v| {
+                let v = (v * scale).round() as i64;
+                if v >= 0 {
+                    v as u64
+                } else {
+                    (self.param.plaintext_modulus as i64 + v) as u64
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let p = self.param.plaintext_modulus / 2;
+        let cleartext_mod2 = cleartext.iter().map(|&x| x % 2).collect();
+        let cleartext_modp = cleartext.iter().map(|&x| x % p).collect();
+        // let cleartext_mod2 = rounded
+        //     .iter()
+        //     .map(|&x| {
+        //         if x >= 0 {
+        //             x as u64 % 2
+        //         } else {
+        //             (self.param.plaintext_modulus as i64 + (x % 2)) as u64
+        //         }
+        //     }).collect::<Vec<_>>();
+        // let cleartext_modp = rounded
+        //     .iter()
+        //     .map(|&x| {
+        //         if x >= 0 {
+        //             x as u64 % p
+        //         } else {
+        //             println!("x {} x%p {}", x, x % p as i64);
+        //             (self.param.plaintext_modulus as i64 + (x % p as i64)) as u64
+        //         }
+        //     }).collect::<Vec<_>>();
+
+        let ggsw_mod2 = self.encrypt_ggsw_sk(Polynomial::from_container(cleartext_mod2), self.sk.clone().as_view());
+        let ggsw_modp = self.encrypt_ggsw_sk(Polynomial::from_container(cleartext_modp), self.sk.clone().as_view());
+        (ggsw_mod2, ggsw_modp)
+    }
+
+    /// encrypt the features to ggsw ciphertext
+    fn encrypt_ggsw_sk(
+        &self,
+        clearpoly: PolynomialOwned<u64>,
+        glwe_sk: GlweSecretKeyView<u64>,
+    ) -> GgswCiphertextOwned<u64> {
+        let mut seeder = new_seeder();
+
+        let mut encryption_generator = EncryptionRandomGenerator::<ActivatedRandomGenerator>::new(
+            seeder.seed(),
+            seeder.as_mut(),
+        );
+
+        let ciphertext_modulus = CiphertextModulus::new_native();
+
+    
+        let mut ggsw = GgswCiphertext::new(
+            0u64,
+            self.param.glwe_size,
+            self.param.polynomial_size,
+            self.param.decomposition_base_log,
+            self.param.decomposition_level_count,
+            ciphertext_modulus,
+        );
+
+        encrypt_constant_ggsw_ciphertext(
+            &self.sk,
+            &mut ggsw,
+            Plaintext(0),
+            self.distribution,
+            &mut encryption_generator,
+        );
+
+        // iterate over the ggsw ciphertext blocks
+        for (level_idx, mut level_matrix) in ggsw.iter_mut().enumerate() {
+            // idx from top to down
+            let idx = self.param.decomposition_level_count.0 - level_idx;
+            let mut clearpoly_beta = clearpoly.clone();
+            // beta_j * m
+            clearpoly_beta
+                .as_mut()
+                .iter_mut()
+                .for_each(|vi| *vi *= 1 << (self.param.decomposition_base_log.0 as usize * idx));
+
+            for (row_idx, mut row_as_glwe) in level_matrix.as_mut_glwe_list().iter_mut().enumerate()
+            {
+                let mut body = Polynomial::from_container(vec![0; self.param.polynomial_size.0]);
+
+                if row_idx + 1 < self.param.glwe_size.0 {
+                    // beta_j * s_i * m
+                    polynomial_wrapping_mul(
+                        &mut body,
+                        &clearpoly_beta,
+                        &glwe_sk.as_polynomial_list().get(row_idx as usize),
+                    );
+
+                    // negate
+                    body.as_mut().iter_mut().for_each(|v| *v = !(*v) + 1);
+                } else {
+                    // b
+                    body.clone_from(&clearpoly_beta);
+                }
+
+                // add it to the zero ciphertext `row_as_glwe`
+                // slice_wrapping_add_assign(row_as_glwe.get_mut_body().as_mut(), body.as_ref());
+                polynomial_wrapping_add_assign(&mut row_as_glwe.get_mut_body().as_mut_polynomial(), &body);
+            }
+        }
+
+        ggsw
+    }
+
+    pub fn decrypt_lwe(&self, ct: LweCiphertextOwned<u64>) -> Vec<u64> {
+        let lwe_sk = self.sk.as_lwe_secret_key();
+        // let lwe_sk = LweSecretKey::from_container(lwe_sk);
+        // decrypt_glwe_ciphertext(&self.glwe_sk, &ct, &mut pt_list);
+        let v = decrypt_lwe_ciphertext(&lwe_sk, &ct).0;
+        let v_over_delta = (v as f64 / self.param.delta as f64).round() as u64 % self.param.plaintext_modulus;
+
+        // let m = if v_over_delta > self.param.plaintext_modulus as i64 / 2 {
+        //     v_over_delta - self.param.plaintext_modulus as i64
+        // } else {
+        //     v_over_delta as i64
+        // };
+        
+        vec![v_over_delta]
+    }
+
+    pub fn decrypt_glwe(&self, ct: &GlweCiphertextOwned<u64>) -> Vec<u64> {
+        let mut pt_list = PlaintextList::new(0, PlaintextCount(self.param.polynomial_size.0));
+        decrypt_glwe_ciphertext(&self.sk, &ct, &mut pt_list);
+
+        pt_list.into_container().into_iter().map(|v| {
+            (v as f64 / self.param.delta as f64).round() as u64 % self.param.plaintext_modulus
+        }).collect()
+    }
+}
+
+#[test]
+fn test_stateless() {
+    let client = StateLessClient::new(DEFAULT_STATELESS_PARAMETER);
+    let mut server = StateLessServer::new(DEFAULT_STATELESS_PARAMETER);
+
+    // features
+    let mut f1 = vec![0f32; 512];
+    let mut f2 = vec![0f32; 512];
+    f1[1] = 0.295f32;
+    f2[511] = -0.295f32;
+
+    // enrollment
+    let ggsws = client.encrypt_ggsw( &f1, 512.0);
+    server.enroll(0, ggsws);
+
+    let glwes = client.encrypt_glwe(&f2, 512.0);
+    println!("{:?}", client.decrypt_glwe(&glwes.1));
+
+    let verif_res = server.verify(0, glwes).unwrap();
+    let pt = client.decrypt_lwe(verif_res);
+    println!("pt {:?}", pt);
+
+    
 }
