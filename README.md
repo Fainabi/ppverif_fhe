@@ -22,3 +22,48 @@ For benchnmark on the case that the client stores the PRNG seeds run:
 $ cargo bench --bench prng_bench
 ```
 This bench will test the time for prng generation and hint construction. Other processes are exactly same to that in `hint_bench` so one just check the `hint_bench` for the benchmark test.
+
+
+## JNI Support
+Install Rust Android tools
+```sh
+$ rustup target add aarch64-linux-android armv7-linux-androideabi
+$ cargo install cargo-ndk
+```
+
+Install the following build tools using Android Studio in  `Settings -> Languages & Frameworks -> Android SDK -> SDK Tools`
+- NDK (Side by side)
+- CMake
+- Android SDK Command-line Tools
+
+Modify `Cargo.toml`
+```toml
+[dependencies]
+tfhe = { version = "0.6.4", default-features = false, features = ["boolean", "shortint", "integer", "seeder_unix"] }
+jni = "0.21"
+
+[lib]
+crate-type = ["cdylib"]
+```
+
+Compile as dynamic library for ARM platform
+```sh
+$ cargo ndk -t armeabi-v7a -t arm64-v8a -o ../ppverif_android/app/src/main/jniLibs build --release
+```
+will generate `jniLibs/arm64-v8a/libppverif_fhe.so` and `jniLibs/armeabi-v7a/libppverif_fhe.so`
+
+Call `testClient` using Kotlin:
+```kotlin
+package com.example.ppverif
+
+object RustBridge {
+    init {
+        System.loadLibrary("ppverif_fhe")
+    }
+
+    @JvmStatic
+    external fun testClient(): FloatArray
+}
+
+val testResult: FloatArray = RustBridge.testClient() // will get the test time
+```
