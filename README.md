@@ -6,6 +6,18 @@ Current requirement is just:
 - Rust version >= 1.84 
 to ensure the compilation of [tfhe.rs](https://github.com/zama-ai/tfhe-rs)
 
+## Checkout for different architectures
+
+For x86 system, run
+```sh
+$ git checkout x86_64
+```
+
+For android device, run
+```sh
+$ git checkout android
+```
+
 ## Demo and Benches
 To run the demo, enter:
 ```sh
