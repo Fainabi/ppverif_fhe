@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use rand::*;
 use tfhe::core_crypto::prelude::*;
 use tfhe::core_crypto::commons::math::random::*;
@@ -31,7 +31,7 @@ pub struct Client {
     threshold: usize,  // always assume threshold to be non-negative in the current implementations
     precision: usize,
 
-    database: BTreeMap<u128, Vec<Vec<PlaintextListOwned<u64>>>>,
+    database: HashMap<u128, Vec<Vec<PlaintextListOwned<u64>>>>,
 }
 
 impl Client {
@@ -68,7 +68,7 @@ impl Client {
             noise_seeder: seeder,
             threshold: 0,
             precision: 8,  // [-127, 128]
-            database: BTreeMap::new(),
+            database: HashMap::new(),
         }
     }
 

@@ -7,8 +7,13 @@ edition = "2021"
 tfhe = { version = "0.6.4", features = ["boolean", "shortint", "integer", "x86_64"] }
 rand = "0.8.5"
 
+[profile.release]
+debug = 1
+
 [features]
 debug = []
+dhat-heap = []
+dhat-ad-hoc = []
 
 [[example]]
 name = "demo"
@@ -16,6 +21,7 @@ path = "examples/demo.rs"
 
 [dev-dependencies]
 criterion = { version = "0.5" }
+dhat = { version = "0.3.3" }
 
 [[bench]]
 name = "hint_bench"
