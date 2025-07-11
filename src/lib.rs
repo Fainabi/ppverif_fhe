@@ -24,7 +24,6 @@ pub extern "system" fn Java_com_example_ppverif_RustBridge_testClient(
 ) -> jfloatArray {
 
     let mut rust_floats: Vec<f32> = vec![];
-    // let repeat_time = 100;
 
     for ip_param in [
         INNER_PRODUCT_PARAMETER_DIMENSION_128,
@@ -34,15 +33,16 @@ pub extern "system" fn Java_com_example_ppverif_RustBridge_testClient(
         INNER_PRODUCT_PARAMETER_DIMENSION_2048,
         INNER_PRODUCT_PARAMETER_DIMENSION_4096,
     ] {
-        let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER);
+        let N = ip_param.polynomial_size.0;
+        let mut client = Client::new(ip_param, DEFAULT_BLIND_ROTATION_PARAMETER);
         let pk = client.new_glwe_public_keys_br();
-        let mut server = Server::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER, pk);
+        let mut server = Server::new(ip_param, DEFAULT_BLIND_ROTATION_PARAMETER, pk);
 
         // features
-        let mut f1 = vec![0f32; 512];
-        let mut f2 = vec![0f32; 512];
+        let mut f1 = vec![0f32; N];
+        let mut f2 = vec![0f32; N];
         f1[1] = 1f32;
-        f2[511] = -0.2f32;
+        f2[N - 1] = -0.2f32;
 
         // enrollment
         let template = client.encrypt_new_template(0, &f1, 512.0);
