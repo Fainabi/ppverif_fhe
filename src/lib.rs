@@ -5,24 +5,26 @@ mod seeder;
 mod utils;
 
 pub use client::Client;
-pub use params::{DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER};
+pub use params::*;
 pub use server::Server;
 pub use utils::normalize;
 
 use std::time::Instant;
 use jni::objects::JClass;
 use jni::sys::jfloatArray;
+use jni::sys::jint;
 use jni::JNIEnv;
 
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_example_ppverif_RustBridge_testClient(
     mut _env: JNIEnv,
-    _class: JClass
+    _class: JClass,
+    repeat_time: jint
 ) -> jfloatArray {
 
     let mut rust_floats: Vec<f32> = vec![];
-    let repeat_time = 100;
+    // let repeat_time = 100;
 
     for ip_param in [
         INNER_PRODUCT_PARAMETER_DIMENSION_128,
