@@ -3,6 +3,7 @@ use rand::*;
 use tfhe::core_crypto::prelude::*;
 use tfhe::core_crypto::commons::math::random::*;
 use tfhe::core_crypto::algorithms::polynomial_algorithms::*;
+use nalgebra;
 
 use crate::params::*;
 use crate::seeder::IdSeeder;
@@ -296,11 +297,11 @@ impl Client {
             return None;
         }
         let masks_for_innerprod = masks_for_innerprod.unwrap();
-        #[cfg(feature = "debug")]
-        println!("masks for innerprod: {}", masks_for_innerprod);
 
         let carry = masks_for_innerprod & (1 << (63 - self.precision));
         let masks_for_innerprod = u64::wrapping_add(masks_for_innerprod >> (64 - self.precision), carry >> (63 - self.precision));
+        #[cfg(feature = "debug")]
+        println!("masks for innerprod: {}", masks_for_innerprod);
 
         // lookup table where `mased_innerprod + [theta,N/2)` are assigned with 1, and others with 0
         // Note that when modulo 2, -1 is regarded as one so the rotation is cyclic.
@@ -344,7 +345,7 @@ impl Client {
     }
 
     /// Transform the template mask to decrypted body
-    fn transform_mask_to_body(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> u64 {
+    pub(crate) fn transform_mask_to_body(&mut self, id: u128, glwe_ct: GlweCiphertextView<u64>) -> u64 {
         let ciphertext_modulus = CiphertextModulus::new_native();
         let mut glwe_ct_list = GlweCiphertextList::new(
             0,
@@ -500,4 +501,80 @@ impl Client {
                 generator.fill_slice_with_random_uniform_custom_mod(ct.get_mut_mask().as_mut(), ciphertext_modulus);
             });
     }
+
+    pub fn collect_database_into_matrix(&self) -> Option<nalgebra::DMatrix<u64>> {
+        if self.database.len() == 0 {
+            return None;
+        }
+
+        let col_size = self.database
+            .iter()
+            .map(|(_k, v)| {
+                v.iter()
+                 .map(|vi| vi.iter().map(|vij| 
+                    vij.as_view().into_container().len()
+                 ).sum::<usize>())
+                 .sum::<usize>()
+            })
+            .next()
+            .unwrap();
+
+        let mat = nalgebra::DMatrix::from_row_iterator(
+            self.database.len(), 
+            col_size,
+            self.database
+                .iter()
+                .flat_map(|(_k, ggsw_dec_mask)| {
+                    ggsw_dec_mask
+                        .iter()
+                        .flat_map(|ct_tensor_g| {
+                            ct_tensor_g
+                                .iter()
+                                .flat_map(|poly| {
+                                    let cont = poly.as_polynomial().into_container();
+                                    // poly.as_ref().iter().copied()
+                                    (0..cont.len()).map(|i| if i == 0 { cont[0] } else { cont[cont.len() - i].wrapping_neg() })
+                                })
+                        })
+                })
+            );
+        
+        Some(mat)
+    }
+}
+
+#[test]
+fn test_client_db() {
+    let mut client = Client::new(DEFAULT_INNER_PRODUCT_PARAMETER, DEFAULT_BLIND_ROTATION_PARAMETER);
+    for i in 0..10 {
+        client.enroll_ggsw_masks(i);
+    }
+
+    let mat = client.collect_database_into_matrix().unwrap();
+    println!("matlen: {}, rowlen: {}, collen: {}", mat.len(), mat.row_iter().count(), mat.column_iter().count());
+
+    for i in 0..10 {
+        let mut f = vec![0.0; 512];
+        f[i] = 1.0f32;
+        
+        let i = i as u128;
+        client.enroll_ggsw_masks(i);
+    }
+
+    let mut query_feature = vec![0.0; 512];
+    query_feature[0] = 0.3f32;
+
+    let new_glwe = client.encrypt_glwe(&query_feature, 512.0);
+    let new_glwe_cont = new_glwe.clone().into_container();
+    let n = new_glwe_cont.len();
+    let vec_glwe = nalgebra::DVector::from_iterator(n, new_glwe_cont.into_iter().map(|x| x >> 32));
+    
+    let mat_client = client.collect_database_into_matrix().unwrap();
+    let mul_client_mat = mat_client * vec_glwe;
+
+    for i in 0..10 {
+        let client_mul = client.transform_mask_to_body(i, new_glwe.as_view());
+        assert_eq!(mul_client_mat[i as usize], client_mul);
+    }
+    
 }

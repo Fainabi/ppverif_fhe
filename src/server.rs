@@ -4,7 +4,7 @@ use polynomial_algorithms::polynomial_wrapping_add_mul_assign;
 use tfhe::core_crypto::commons::math::random::RandomGenerator;
 use tfhe::core_crypto::prelude::*;
 
-use crate::params::*;
+use crate::{params::*, Client};
 
 pub struct Server {
     ip_param: GlweParameter<u64>,
@@ -170,4 +170,72 @@ impl Server {
 
         glwe_ct
     }
+
+    pub fn collect_database_into_matrix(&self) -> Option<nalgebra::DMatrix<u64>> {
+        if self.database.len() == 0 {
+            return None;
+        }
+
+        let col_size = self.database
+            .iter()
+            .map(|(_k, v)| {
+                v.iter()
+                 .map(|vi| vi.as_ref().iter().count())
+                 .sum()
+            })
+            .next()
+            .unwrap();
+
+        let mat = nalgebra::DMatrix::from_row_iterator(
+            self.database.len(), 
+            col_size,
+            self.database
+                .iter()
+                .flat_map(|(_k, ggsw_dec_mask)| {
+                    ggsw_dec_mask
+                        .iter()
+                        .flat_map(|ct_tensor_g| {
+                            let cont = ct_tensor_g.as_polynomial().into_container();
+
+                            (0..cont.len()).map(|i| if i == 0 { cont[0] } else { cont[cont.len() - i].wrapping_neg() })
+                        })
+                })
+            );
+        
+        Some(mat)
+    }
+}
+
+
+#[test]
+fn test_server_db() {
+    let ip_param = DEFAULT_INNER_PRODUCT_PARAMETER;
+    let br_param = DEFAULT_BLIND_ROTATION_PARAMETER;
+    let mut client = Client::new(ip_param, br_param);
+    let glwe_pk = client.new_glwe_public_keys_br();
+    let mut server = Server::new(ip_param, br_param, glwe_pk);
+
+    for i in 0..10 {
+        let mut f = vec![0.0; 512];
+        f[i] = 1.0f32;
+        
+        let i = i as u128;
+        let template = client.encrypt_new_template(i, &f, 512.0);
+        server.enroll(i, template);
+    }
+
+    let mat_server = server.collect_database_into_matrix().unwrap();
+    let mut query_feature = vec![0.0; 512];
+    query_feature[0] = 0.3f32;
+
+    let new_glwe = client.encrypt_glwe(&query_feature, 512.0);
+    let new_glwe_cont = new_glwe.clone().into_container();
+    let n = new_glwe_cont.len();
+    let vec_glwe = nalgebra::DVector::from_iterator(n, new_glwe_cont.into_iter().map(|x| x >> 32));
+
+    server.compute_innerprod_body(0, new_glwe.as_view());
+    client.transform_mask_from_database(0, new_glwe.as_view());
+
+    let mul_server_mat = mat_server * vec_glwe.clone();
+    println!("{:?}", mul_server_mat);
 }

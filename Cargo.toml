@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tfhe = { version = "0.6.4", default-features = false, features = ["boolean", "shortint", "integer", "seeder_unix"] }
+tfhe = { version = "0.6.4", features = ["boolean", "shortint", "integer", "x86_64"] }
 rand = "0.8.5"
-jni = "0.21"
+nalgebra = "0.33.2"
 
 [features]
 debug = []
@@ -25,6 +25,3 @@ harness = false
 [[bench]]
 name = "prng_bench"
 harness = false
-
-[lib]
-crate-type = ["cdylib"]
